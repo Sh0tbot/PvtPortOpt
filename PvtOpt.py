@@ -441,7 +441,7 @@ if st.session_state.optimized:
         st.write("Top 10 Institutional Holdings mapped directly from FMP.")
         
         has_funds = False
-        for ticker, holdings_df in st.session_state.fund_holdings.items():
+        for ticker, holdings_df in st.session_state.get("fund_holdings", {}).items():
             if not holdings_df.empty:
                 has_funds = True
                 with st.expander(f"**{ticker}** Top Holdings"):
