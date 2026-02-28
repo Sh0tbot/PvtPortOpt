@@ -47,7 +47,7 @@ try:
 except KeyError: 
     st.sidebar.error("⚠️ FMP API Key missing from Secrets!"); fmp_api_key = None
 
-# --- FMP PREMIUM DATA ENGINE ---
+# --- FMP PREMIUM DATA ENGINE (V4 ARCHITECTURE) ---
 @st.cache_data(ttl=86400)
 def fetch_fmp_profile(ticker, api_key):
     url = f"https://financialmodelingprep.com/api/v3/profile/{ticker}?apikey={api_key}"
@@ -68,15 +68,35 @@ def fetch_fmp_sector_weightings(ticker, api_key):
 
 @st.cache_data(ttl=86400)
 def fetch_fmp_fund_holdings(ticker, is_mf, api_key):
-    """Pulls actual constituents using v4 Premium endpoints."""
-    # UPDATED: v4 uses 'etf-holder' for both ETFs and Mutual Funds in the new architecture
-    url = f"https://financialmodelingprep.com/api/v4/etf-holder?symbol={ticker}&apikey={api_key}"
+    # Premium V4 Endpoint for Holdings
+    endpoint = "mutual-fund-holder" if is_mf else "etf-holder"
+    url = f"https://financialmodelingprep.com/api/v4/{endpoint}?symbol={ticker}&apikey={api_key}"
     try:
         res = requests.get(url).json()
-        if res and isinstance(res, list): 
-            return res
+        if res and isinstance(res, list): return res
     except: pass
     return []
+
+@st.cache_data(ttl=86400)
+def get_fmp_history(tickers, start_str, end_str, api_key):
+    hist_dict = {}
+    for t in tickers:
+        # Premium V4 Endpoint for Historical Prices
+        url = f"https://financialmodelingprep.com/api/v4/historical-price-full/{t}?from={start_str}&to={end_str}&apikey={api_key}"
+        try:
+            res = requests.get(url).json()
+            # V4 returns a direct list or a dict with 'historical' depending on the exact asset type fallback
+            data_list = res.get('historical', res) if isinstance(res, dict) else res
+            
+            if isinstance(data_list, list) and len(data_list) > 0:
+                df = pd.DataFrame(data_list)
+                if 'date' in df.columns and 'adjClose' in df.columns:
+                    df['date'] = pd.to_datetime(df['date'])
+                    df.set_index('date', inplace=True)
+                    hist_dict[t] = df['adjClose']
+        except: pass
+    if hist_dict: return pd.DataFrame(hist_dict).sort_index()
+    return pd.DataFrame()
 
 def build_asset_metadata(tickers, api_key, excel_df=None):
     meta_dict, lookthrough_dict, holdings_dict = {}, {}, {}
@@ -104,11 +124,19 @@ def build_asset_metadata(tickers, api_key, excel_df=None):
                 if country == 'CA' or t.endswith('.TO'): asset_class = 'Canadian Equities'
                 elif country != 'US': asset_class = 'International Equities'
         
-        # Fallback for Canadian Mutual Funds often missed by Profile endpoint
-        if len(t) >= 5 and any(c.isdigit() for c in t) and not t.endswith('.TO'):
-            is_mf = True
-            asset_class = 'Fund/ETF'
-
+        if excel_df is not None:
+            row = excel_df[excel_df['Clean_Ticker'] == t]
+            if not row.empty:
+                excel_sector = row.iloc[0].get('Sector', 'Unknown')
+                if pd.notna(excel_sector) and str(excel_sector).strip() != '' and str(excel_sector).lower() != 'nan':
+                    sector = str(excel_sector)
+        
+        if t.endswith('.TO') and asset_class == 'US Equities': asset_class = 'Canadian Equities'
+        
+        # Aggressive check for Canadian Mutual Funds
+        if len(t) >= 5 and any(c.isdigit() for c in t) and not t.endswith('.TO'): 
+            asset_class, is_mf = 'Fund/ETF', True 
+        
         meta_dict[t] = (asset_class, sector, div_yield, 1e9)
         
         # --- PREMIUM LOOKTHROUGH ---
@@ -116,10 +144,10 @@ def build_asset_metadata(tickers, api_key, excel_df=None):
             holdings = fetch_fmp_fund_holdings(t, is_mf, api_key)
             if holdings:
                 h_df = pd.DataFrame(holdings)
-                # v4 returns 'symbol' instead of 'asset'
-                cols = ['symbol', 'name', 'weightPercentage']
+                cols = ['symbol', 'asset', 'name', 'weightPercentage']
                 existing_cols = [c for c in cols if c in h_df.columns]
-                holdings_dict[t] = h_df[existing_cols].head(10)
+                if existing_cols:
+                    holdings_dict[t] = h_df[existing_cols].head(10)
             
             sectors_data = fetch_fmp_sector_weightings(t, api_key)
             if sectors_data:
@@ -128,6 +156,7 @@ def build_asset_metadata(tickers, api_key, excel_df=None):
                     raw_w = s.get('weightPercentage', '0')
                     try: w = float(str(raw_w).replace('%', '')) / 100.0
                     except ValueError: w = 0.0
+                        
                     sub_sec = s.get('sector', 'Unknown') or 'Unknown'
                     fund_exposure[sub_sec] = fund_exposure.get(sub_sec, 0) + w
                 
@@ -135,8 +164,10 @@ def build_asset_metadata(tickers, api_key, excel_df=None):
                 if total_weight > 0: fund_exposure = {k: v/total_weight for k, v in fund_exposure.items()}
                 else: fund_exposure = {sector: 1.0}
                 lookthrough_dict[t] = fund_exposure
-            else: lookthrough_dict[t] = {sector: 1.0}
-        else: lookthrough_dict[t] = {sector: 1.0}
+            else: 
+                lookthrough_dict[t] = {sector: 1.0}
+        else: 
+            lookthrough_dict[t] = {sector: 1.0}
             
     return meta_dict, lookthrough_dict, holdings_dict
 
@@ -229,10 +260,8 @@ if optimize_button:
         start_str = start_date.strftime("%Y-%m-%d")
         end_str = end_date.strftime("%Y-%m-%d")
         
-        # Pulling ONLY the timeline you requested to prevent timeout payloads
         data = get_fmp_history(all_tickers, start_str, end_str, fmp_api_key)
 
-        # FMP KEY SANITY CHECK: If absolutely NO data downloaded (not even the SPY benchmark), test the API Key directly.
         if data.empty: 
             diag = requests.get(f"https://financialmodelingprep.com/api/v3/profile/SPY?apikey={fmp_api_key}").json()
             if isinstance(diag, dict) and "Error Message" in diag:
@@ -287,6 +316,7 @@ if optimize_button:
             for mt in tickers: 
                 st.session_state.cleaned_weights[mt] = st.session_state.imported_weights.get(mt, 0.0)
         else:
+            # If manually entered, give missing tickers equal weight
             for mt in missing_price_tickers:
                 st.session_state.cleaned_weights[mt] = 1.0/len(tickers)
 
@@ -418,16 +448,16 @@ if st.session_state.optimized:
     with tab2:
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("### 🔍 Premium Fund X-Ray")
-        st.write("Top 10 Institutional Holdings mapped directly from FMP.")
+        st.write("Top Institutional Holdings mapped directly from FMP.")
         
         has_funds = False
         for ticker, holdings_df in st.session_state.get("fund_holdings", {}).items():
             if not holdings_df.empty:
                 has_funds = True
                 with st.expander(f"**{ticker}** Top Holdings"):
-                    holdings_df['weightPercentage'] = holdings_df['weightPercentage'].apply(lambda x: f"{x:.2f}%")
-                    holdings_df.columns = ['Asset Ticker', 'Company Name', 'Internal Weight']
-                    st.dataframe(holdings_df, width="stretch", hide_index=True)
+                    display_df = holdings_df.copy()
+                    display_df.columns = [c.title() for c in display_df.columns]
+                    st.dataframe(display_df, width="stretch", hide_index=True)
         
         if not has_funds:
             st.info("No ETF or Mutual Fund holdings data detected in this portfolio.")
