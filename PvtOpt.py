@@ -332,7 +332,7 @@ if optimize_button:
             except Exception as e: 
                 pass
 
-        if data.empty: st.error("No valid price data found."); st.stop())
+        if data.empty: st.error("No valid price data found."); st.stop()
         
         data = data.dropna(axis=1, thresh=int(len(data)*0.8)).ffill().bfill()
         opt_data = data.loc[start_str:end_str]
