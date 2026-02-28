@@ -67,38 +67,16 @@ def fetch_fmp_sector_weightings(ticker, api_key):
     return []
 
 @st.cache_data(ttl=86400)
-def get_fmp_history(tickers, start_str, end_str, api_key):
-    hist_dict = {}
-    for t in tickers:
-        # UPDATED: Using v4 for historical prices as required for new Premium accounts
-        url = f"https://financialmodelingprep.com/api/v4/historical-price-full/{t}?from={start_str}&to={end_str}&apikey={api_key}"
-        try:
-            res = requests.get(url).json()
-            if isinstance(res, list): # v4 returns a direct list of data points
-                df = pd.DataFrame(res)
-                df['date'] = pd.to_datetime(df['date'])
-                df.set_index('date', inplace=True)
-                hist_dict[t] = df['adjClose'] 
-        except Exception as e:
-            pass
-    if hist_dict: return pd.DataFrame(hist_dict).sort_index()
-    return pd.DataFrame()
-
-@st.cache_data(ttl=86400)
-def get_fmp_history(tickers, start_str, end_str, api_key):
-    hist_dict = {}
-    for t in tickers:
-        url = f"https://financialmodelingprep.com/api/v3/historical-price-full/{t}?from={start_str}&to={end_str}&apikey={api_key}"
-        try:
-            res = requests.get(url).json()
-            if 'historical' in res:
-                df = pd.DataFrame(res['historical'])
-                df['date'] = pd.to_datetime(df['date'])
-                df.set_index('date', inplace=True)
-                hist_dict[t] = df['adjClose'] 
-        except: pass
-    if hist_dict: return pd.DataFrame(hist_dict).sort_index()
-    return pd.DataFrame()
+def fetch_fmp_fund_holdings(ticker, is_mf, api_key):
+    """Pulls actual constituents using v4 Premium endpoints."""
+    # UPDATED: v4 uses 'etf-holder' for both ETFs and Mutual Funds in the new architecture
+    url = f"https://financialmodelingprep.com/api/v4/etf-holder?symbol={ticker}&apikey={api_key}"
+    try:
+        res = requests.get(url).json()
+        if res and isinstance(res, list): 
+            return res
+    except: pass
+    return []
 
 def build_asset_metadata(tickers, api_key, excel_df=None):
     meta_dict, lookthrough_dict, holdings_dict = {}, {}, {}
@@ -109,9 +87,7 @@ def build_asset_metadata(tickers, api_key, excel_df=None):
         
         profile = fetch_fmp_profile(t, api_key)
         if profile:
-            sector = profile.get('sector', 'Unknown')
-            if not sector: sector = 'Unknown'
-            
+            sector = profile.get('sector', 'Unknown') or 'Unknown'
             div = profile.get('lastDiv', 0.0)
             price = profile.get('price', 0.0)
             if div and price and price > 0: div_yield = div / price
@@ -128,23 +104,22 @@ def build_asset_metadata(tickers, api_key, excel_df=None):
                 if country == 'CA' or t.endswith('.TO'): asset_class = 'Canadian Equities'
                 elif country != 'US': asset_class = 'International Equities'
         
-        if excel_df is not None:
-            row = excel_df[excel_df['Clean_Ticker'] == t]
-            if not row.empty:
-                excel_sector = row.iloc[0].get('Sector', 'Unknown')
-                if pd.notna(excel_sector) and str(excel_sector).strip() != '' and str(excel_sector).lower() != 'nan':
-                    sector = str(excel_sector)
-        
-        if t.endswith('.TO') and asset_class == 'US Equities': asset_class = 'Canadian Equities'
-        if len(t) >= 5 and any(c.isdigit() for c in t): asset_class, is_mf = 'Fund/ETF', True 
-        
+        # Fallback for Canadian Mutual Funds often missed by Profile endpoint
+        if len(t) >= 5 and any(c.isdigit() for c in t) and not t.endswith('.TO'):
+            is_mf = True
+            asset_class = 'Fund/ETF'
+
         meta_dict[t] = (asset_class, sector, div_yield, 1e9)
         
-        # --- TRUE FMP LOOKTHROUGH ---
+        # --- PREMIUM LOOKTHROUGH ---
         if (is_fund or is_mf) and api_key:
             holdings = fetch_fmp_fund_holdings(t, is_mf, api_key)
             if holdings:
-                holdings_dict[t] = pd.DataFrame(holdings)[['asset', 'name', 'weightPercentage']].head(10)
+                h_df = pd.DataFrame(holdings)
+                # v4 returns 'symbol' instead of 'asset'
+                cols = ['symbol', 'name', 'weightPercentage']
+                existing_cols = [c for c in cols if c in h_df.columns]
+                holdings_dict[t] = h_df[existing_cols].head(10)
             
             sectors_data = fetch_fmp_sector_weightings(t, api_key)
             if sectors_data:
@@ -153,23 +128,14 @@ def build_asset_metadata(tickers, api_key, excel_df=None):
                     raw_w = s.get('weightPercentage', '0')
                     try: w = float(str(raw_w).replace('%', '')) / 100.0
                     except ValueError: w = 0.0
-                        
-                    sub_sec = s.get('sector', 'Unknown')
-                    if not sub_sec: sub_sec = 'Unknown'
+                    sub_sec = s.get('sector', 'Unknown') or 'Unknown'
                     fund_exposure[sub_sec] = fund_exposure.get(sub_sec, 0) + w
                 
                 total_weight = sum(fund_exposure.values())
                 if total_weight > 0: fund_exposure = {k: v/total_weight for k, v in fund_exposure.items()}
                 else: fund_exposure = {sector: 1.0}
                 lookthrough_dict[t] = fund_exposure
-            else: 
-                if holdings:
-                    fund_exposure = {}
-                    for h in holdings:
-                        w = h.get('weightPercentage', 0) / 100.0
-                        fund_exposure[sector] = fund_exposure.get(sector, 0) + w
-                    lookthrough_dict[t] = fund_exposure
-                else: lookthrough_dict[t] = {sector: 1.0}
+            else: lookthrough_dict[t] = {sector: 1.0}
         else: lookthrough_dict[t] = {sector: 1.0}
             
     return meta_dict, lookthrough_dict, holdings_dict
