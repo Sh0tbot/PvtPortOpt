@@ -497,4 +497,11 @@ if st.session_state.optimized:
             edited_df = st.data_editor(editable_df, hide_index=True, use_container_width=True)
             merged_df = pd.merge(trade_df, edited_df, on='Ticker', how='left')
             
-        merged_df['Action ($)'] = merged_df['Target Val ($
+        merged_df['Action ($)'] = merged_df['Target Val ($)'] - merged_df['Current Val ($)']
+        merged_df['Trade Action'] = merged_df['Action ($)'].apply(lambda x: f"BUY ${x:,.2f}" if x > 1 else (f"SELL ${abs(x):,.2f}" if x < -1 else "HOLD"))
+        
+        st.markdown("**Final Execution List:**")
+        display_trade = merged_df[['Ticker', 'Asset Class', 'Yield', 'Target %', 'Current Val ($)', 'Target Val ($)', 'Trade Action']].copy()
+        display_trade['Target Val ($)'] = display_trade['Target Val ($)'].apply(lambda x: f"${x:,.2f}")
+        display_trade['Current Val ($)'] = display_trade['Current Val ($)'].apply(lambda x: f"${x:,.2f}")
+        st.dataframe(display_trade, use_container_width=True)
