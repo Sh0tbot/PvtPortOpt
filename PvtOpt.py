@@ -67,14 +67,22 @@ def fetch_fmp_sector_weightings(ticker, api_key):
     return []
 
 @st.cache_data(ttl=86400)
-def fetch_fmp_fund_holdings(ticker, is_mf, api_key):
-    endpoint = "mutual-fund-holder" if is_mf else "etf-holder"
-    url = f"https://financialmodelingprep.com/api/v3/{endpoint}/{ticker}?apikey={api_key}"
-    try:
-        res = requests.get(url).json()
-        if res and isinstance(res, list): return res
-    except: pass
-    return []
+def get_fmp_history(tickers, start_str, end_str, api_key):
+    hist_dict = {}
+    for t in tickers:
+        # UPDATED: Using v4 for historical prices as required for new Premium accounts
+        url = f"https://financialmodelingprep.com/api/v4/historical-price-full/{t}?from={start_str}&to={end_str}&apikey={api_key}"
+        try:
+            res = requests.get(url).json()
+            if isinstance(res, list): # v4 returns a direct list of data points
+                df = pd.DataFrame(res)
+                df['date'] = pd.to_datetime(df['date'])
+                df.set_index('date', inplace=True)
+                hist_dict[t] = df['adjClose'] 
+        except Exception as e:
+            pass
+    if hist_dict: return pd.DataFrame(hist_dict).sort_index()
+    return pd.DataFrame()
 
 @st.cache_data(ttl=86400)
 def get_fmp_history(tickers, start_str, end_str, api_key):
