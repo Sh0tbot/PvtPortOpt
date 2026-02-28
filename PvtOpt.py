@@ -8,7 +8,7 @@ import tempfile
 from fpdf import FPDF
 import datetime
 import requests
-import yfinance as yf 
+import yfinance as yf
 
 # --- UI CONFIGURATION ---
 st.set_page_config(page_title="Private Portfolio Manager", layout="wide", page_icon="🏦", initial_sidebar_state="expanded")
@@ -134,7 +134,6 @@ def build_asset_metadata(tickers, api_key, excel_df=None):
             if sectors_data:
                 fund_exposure = {}
                 for s in sectors_data:
-                    # FMP returns weights as strings like "25.5%"
                     raw_w = s.get('weightPercentage', '0')
                     try:
                         w = float(str(raw_w).replace('%', '')) / 100.0
@@ -145,7 +144,6 @@ def build_asset_metadata(tickers, api_key, excel_df=None):
                     if not sub_sec: sub_sec = 'Unknown'
                     fund_exposure[sub_sec] = fund_exposure.get(sub_sec, 0) + w
                 
-                # Normalize weights to ensure they equal exactly 100%
                 total_weight = sum(fund_exposure.values())
                 if total_weight > 0:
                     fund_exposure = {k: v/total_weight for k, v in fund_exposure.items()}
@@ -267,7 +265,7 @@ portfolio_value = st.sidebar.number_input("Total Portfolio Target Value ($)", mi
 mc_years = st.sidebar.slider("Monte Carlo Years", 1, 30, 10)
 mc_sims = st.sidebar.selectbox("Simulations", (100, 500, 1000), index=1)
 
-optimize_button = st.sidebar.button("Run Full Analysis", type="primary", use_container_width=True)
+optimize_button = st.sidebar.button("Run Full Analysis", type="primary", width="stretch")
 
 # --- MAIN APP LOGIC ---
 if optimize_button:
@@ -287,7 +285,10 @@ if optimize_button:
             if 'Symbol' in df.columns and 'MV (%)' in df.columns:
                 def parse_ticker(row):
                     t = str(row['Symbol']).strip().upper()
-                    if not t.endswith('.TO') and not t.endswith('.'):
+                    # Fixed: Map Canadian .T suffix to .TO
+                    if t.endswith('.T'): 
+                        t = t[:-2] + '.TO'
+                    elif not t.endswith('.TO') and not t.endswith('.'):
                         r = str(row.get('Region', '')).strip().upper()
                         if r == 'CA': t += '.TO'
                     return t
@@ -329,17 +330,14 @@ if optimize_button:
         if missing:
             try:
                 yf_raw = yf.download(missing, start=fetch_start, end=end_str)
-                # Safely attempt to get Adjusted Close, fallback to standard Close
                 try:
                     yf_data = yf_raw['Adj Close']
                 except KeyError:
                     yf_data = yf_raw['Close']
                     
-                # Format single-ticker downloads correctly
                 if isinstance(yf_data, pd.Series) and len(missing) == 1: 
                     yf_data = yf_data.to_frame(missing[0])
                     
-                # Stitch the data together
                 if not yf_data.empty:
                     yf_data.index = pd.to_datetime(yf_data.index).tz_localize(None) 
                     if data.empty:
@@ -354,10 +352,23 @@ if optimize_button:
         data = data.dropna(axis=1, thresh=int(len(data)*0.8)).ffill().bfill()
         opt_data = data.loc[start_str:end_str]
         
+        # Fixed: Safety Net for missing data (e.g. Mutual Funds)
         final_tickers = [t for t in tickers if t in opt_data.columns]
+        dropped_tickers = [t for t in tickers if t not in final_tickers]
+        
+        if dropped_tickers:
+            st.warning(f"⚠️ **Missing Price Data:** The APIs could not track `{', '.join(dropped_tickers)}`. They have been excluded and your portfolio weights have been re-normalized.")
+            if st.session_state.imported_weights:
+                for d in dropped_tickers: 
+                    st.session_state.imported_weights.pop(d, None)
+                tot_w = sum(st.session_state.imported_weights.values())
+                if tot_w > 0:
+                    st.session_state.imported_weights = {k: v/tot_w for k, v in st.session_state.imported_weights.items()}
+        
         port_data = opt_data[final_tickers]
         
-        if port_data.empty: st.error("Not enough trading days/assets in this Time Range."); st.stop()
+        if port_data.empty or len(final_tickers) < 2: 
+            st.error("Not enough valid assets remaining to run optimization."); st.stop()
 
         if autobench:
             st.session_state.proxy_data = data[[p for p in BENCH_MAP.values() if p in data.columns]]
@@ -470,14 +481,14 @@ if st.session_state.optimized:
             st.markdown("**Target Asset Class**")
             fig_ac, ax_ac = plt.subplots(figsize=(6, 6))
             ax_ac.pie(ac_totals.values(), labels=ac_totals.keys(), autopct='%1.1f%%', colors=sns.color_palette("pastel"))
-            st.pyplot(fig_ac, use_container_width=True, clear_figure=True)
+            st.pyplot(fig_ac, clear_figure=True)
             
         with pie_col2:
             clean_sec = {k: v for k, v in sec_totals.items() if v > 0.01}
             st.markdown("**True Sector Exposure (Lookthrough)**")
             fig_sec, ax_sec = plt.subplots(figsize=(6, 6))
             ax_sec.pie(clean_sec.values(), labels=clean_sec.keys(), autopct='%1.1f%%', colors=sns.color_palette("muted"))
-            st.pyplot(fig_sec, use_container_width=True, clear_figure=True)
+            st.pyplot(fig_sec, clear_figure=True)
             
         with pie_col3:
             st.markdown("**Asset Correlation Matrix**")
@@ -488,7 +499,7 @@ if st.session_state.optimized:
             fig_corr, ax_corr = plt.subplots(figsize=(7, 6))
             sns.heatmap(corr_matrix, annot=show_numbers, cmap='coolwarm', vmin=-1, vmax=1, ax=ax_corr, fmt=".2f", cbar=not show_numbers)
             ax_corr.tick_params(axis='x', rotation=90, labelsize=font_size)
-            st.pyplot(fig_corr, use_container_width=True, clear_figure=True)
+            st.pyplot(fig_corr, clear_figure=True)
 
     with tab2:
         st.markdown("<br>", unsafe_allow_html=True)
@@ -518,10 +529,9 @@ if st.session_state.optimized:
             merged_df = trade_df.copy()
         else:
             editable_df = pd.DataFrame({'Ticker': trade_df['Ticker'], 'Current Val ($)': [0.0]*len(trade_df)})
-            edited_df = st.data_editor(editable_df, hide_index=True, use_container_width=True)
+            edited_df = st.data_editor(editable_df, hide_index=True, width="stretch")
             merged_df = pd.merge(trade_df, edited_df, on='Ticker', how='left')
             
-        # FIXED: Corrected string literal syntax here
         merged_df['Action ($)'] = merged_df['Target Val ($)'] - merged_df['Current Val ($)']
         merged_df['Trade Action'] = merged_df['Action ($)'].apply(lambda x: f"BUY ${x:,.2f}" if x > 1 else (f"SELL ${abs(x):,.2f}" if x < -1 else "HOLD"))
         
@@ -529,7 +539,7 @@ if st.session_state.optimized:
         display_trade = merged_df[['Ticker', 'Asset Class', 'Yield', 'Target %', 'Current Val ($)', 'Target Val ($)', 'Trade Action']].copy()
         display_trade['Target Val ($)'] = display_trade['Target Val ($)'].apply(lambda x: f"${x:,.2f}")
         display_trade['Current Val ($)'] = display_trade['Current Val ($)'].apply(lambda x: f"${x:,.2f}")
-        st.dataframe(display_trade, use_container_width=True)
+        st.dataframe(display_trade, width="stretch")
 
     with tab3:
         st.info("Additional analytics and charts hidden for brevity. Your core Lookthrough engine is now active in Tab 1!")
