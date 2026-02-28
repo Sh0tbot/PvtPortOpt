@@ -304,7 +304,7 @@ if optimize_button:
     with st.spinner("Downloading Historical Prices..."):
         start_str = start_date.strftime("%Y-%m-%d")
         end_str = end_date.strftime("%Y-%m-%d")
-        fetch_start = min(start_date, pd.to_datetime("2007-01-01")).strftime("%Y-%m-%d")
+        fetch_start = min(pd.to_datetime(start_date), pd.to_datetime("2007-01-01")).strftime("%Y-%m-%d")
         
         # Try FMP First
         data = get_fmp_history(all_tickers, fetch_start, end_str, fmp_api_key)
