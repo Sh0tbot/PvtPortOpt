@@ -302,22 +302,37 @@ if optimize_button:
     with st.spinner("Downloading Historical Prices..."):
         start_str = start_date.strftime("%Y-%m-%d")
         end_str = end_date.strftime("%Y-%m-%d")
-        # FIXED: Enforce datetime typing for comparison before converting to string
         fetch_start = min(pd.to_datetime(start_date), pd.to_datetime("2007-01-01")).strftime("%Y-%m-%d")
         
+        # Try FMP First
         data = get_fmp_history(all_tickers, fetch_start, end_str, fmp_api_key)
         
+        # Fallback to Yahoo if FMP misses (or if on FMP Free Tier)
         missing = [t for t in all_tickers if t not in data.columns]
         if missing:
             try:
-                yf_data = yf.download(missing, start=fetch_start, end=end_str)['Adj Close']
-                if isinstance(yf_data, pd.Series) and len(missing) == 1: yf_data = yf_data.to_frame(missing[0])
+                yf_raw = yf.download(missing, start=fetch_start, end=end_str)
+                # Safely attempt to get Adjusted Close, fallback to standard Close
+                try:
+                    yf_data = yf_raw['Adj Close']
+                except KeyError:
+                    yf_data = yf_raw['Close']
+                    
+                # Format single-ticker downloads correctly
+                if isinstance(yf_data, pd.Series) and len(missing) == 1: 
+                    yf_data = yf_data.to_frame(missing[0])
+                    
+                # Stitch the data together
                 if not yf_data.empty:
                     yf_data.index = pd.to_datetime(yf_data.index).tz_localize(None) 
-                    data = pd.concat([data, yf_data], axis=1)
-            except: pass
+                    if data.empty:
+                        data = yf_data
+                    else:
+                        data = pd.concat([data, yf_data], axis=1)
+            except Exception as e: 
+                pass
 
-        if data.empty: st.error("No valid price data found."); st.stop()
+        if data.empty: st.error("No valid price data found."); st.stop())
         
         data = data.dropna(axis=1, thresh=int(len(data)*0.8)).ffill().bfill()
         opt_data = data.loc[start_str:end_str]
