@@ -41,13 +41,19 @@ def check_password():
 
 if not check_password(): st.stop()
 
+# --- SECRETS INTEGRATION ---
+try: 
+    fmp_api_key = str(st.secrets["fmp_api_key"]).strip()
+except KeyError: 
+    st.sidebar.error("⚠️ FMP API Key missing from Secrets!"); fmp_api_key = None
+
 # --- FMP PREMIUM DATA ENGINE ---
 @st.cache_data(ttl=86400)
 def fetch_fmp_profile(ticker, api_key):
     url = f"https://financialmodelingprep.com/api/v3/profile/{ticker}?apikey={api_key}"
     try:
         res = requests.get(url).json()
-        if res and len(res) > 0: return res[0]
+        if res and isinstance(res, list) and len(res) > 0: return res[0]
     except: pass
     return {}
 
@@ -62,7 +68,6 @@ def fetch_fmp_sector_weightings(ticker, api_key):
 
 @st.cache_data(ttl=86400)
 def fetch_fmp_fund_holdings(ticker, is_mf, api_key):
-    """Pulls the actual constituents of the ETF or Mutual Fund"""
     endpoint = "mutual-fund-holder" if is_mf else "etf-holder"
     url = f"https://financialmodelingprep.com/api/v3/{endpoint}/{ticker}?apikey={api_key}"
     try:
@@ -129,12 +134,10 @@ def build_asset_metadata(tickers, api_key, excel_df=None):
         
         # --- TRUE FMP LOOKTHROUGH ---
         if (is_fund or is_mf) and api_key:
-            # 1. Get Top Holdings
             holdings = fetch_fmp_fund_holdings(t, is_mf, api_key)
             if holdings:
                 holdings_dict[t] = pd.DataFrame(holdings)[['asset', 'name', 'weightPercentage']].head(10)
             
-            # 2. Get Sector Breakdown
             sectors_data = fetch_fmp_sector_weightings(t, api_key)
             if sectors_data:
                 fund_exposure = {}
@@ -152,16 +155,13 @@ def build_asset_metadata(tickers, api_key, excel_df=None):
                 else: fund_exposure = {sector: 1.0}
                 lookthrough_dict[t] = fund_exposure
             else: 
-                # Fallback: Build sector breakdown from raw holdings if sector weighting endpoint misses
                 if holdings:
                     fund_exposure = {}
                     for h in holdings:
                         w = h.get('weightPercentage', 0) / 100.0
-                        # FMP mutual fund holdings rarely pass sector, we map to parent sector
                         fund_exposure[sector] = fund_exposure.get(sector, 0) + w
                     lookthrough_dict[t] = fund_exposure
-                else:
-                    lookthrough_dict[t] = {sector: 1.0}
+                else: lookthrough_dict[t] = {sector: 1.0}
         else: lookthrough_dict[t] = {sector: 1.0}
             
     return meta_dict, lookthrough_dict, holdings_dict
@@ -170,10 +170,6 @@ if "optimized" not in st.session_state: st.session_state.optimized = False
 
 # --- CONSTANTS ---
 BENCH_MAP = {'US Equities': 'SPY', 'Canadian Equities': 'XIU.TO', 'International Equities': 'EFA', 'Fixed Income': 'AGG', 'Cash & Equivalents': 'BIL', 'Other': 'SPY'}
-
-# --- SECRETS INTEGRATION ---
-try: fmp_api_key = st.secrets["fmp_api_key"]
-except KeyError: st.sidebar.error("⚠️ FMP API Key missing!"); fmp_api_key = None
 
 # --- SIDEBAR GUI ---
 st.sidebar.header("1. Input Securities")
@@ -258,22 +254,27 @@ if optimize_button:
     with st.spinner("Downloading FMP Premium Historical Data..."):
         start_str = start_date.strftime("%Y-%m-%d")
         end_str = end_date.strftime("%Y-%m-%d")
-        fetch_start = min(pd.to_datetime(start_date), pd.to_datetime("2000-01-01")).strftime("%Y-%m-%d")
         
-        # STRICT FMP ONLY. NO YFINANCE.
-        data = get_fmp_history(all_tickers, fetch_start, end_str, fmp_api_key)
+        # Pulling ONLY the timeline you requested to prevent timeout payloads
+        data = get_fmp_history(all_tickers, start_str, end_str, fmp_api_key)
 
-        if data.empty: st.error("No valid price data found from FMP."); st.stop()
+        # FMP KEY SANITY CHECK: If absolutely NO data downloaded (not even the SPY benchmark), test the API Key directly.
+        if data.empty: 
+            diag = requests.get(f"https://financialmodelingprep.com/api/v3/profile/SPY?apikey={fmp_api_key}").json()
+            if isinstance(diag, dict) and "Error Message" in diag:
+                st.error(f"🚨 **FMP API Key Error:** {diag['Error Message']}")
+            else:
+                st.error("⚠️ **No valid price data found.** This usually means you are importing 100% unlisted mutual funds and the custom benchmark is invalid.")
+            st.stop()
         
         data = data.dropna(axis=1, thresh=int(len(data)*0.8)).ffill().bfill()
         opt_data = data.loc[start_str:end_str]
         
-        # SPLIT LOGIC: Tickers we can optimize vs Tickers we can only visualize
         opt_tickers = [t for t in tickers if t in opt_data.columns]
         missing_price_tickers = [t for t in tickers if t not in opt_tickers]
         
         if missing_price_tickers:
-            st.info(f"📊 **Note on Unlisted Funds:** FMP does not track daily closing prices for `{', '.join(missing_price_tickers)}`. They remain fully integrated into your Asset/Sector Lookthrough charts, but are excluded from the mathematical volatility modeling.")
+            st.info(f"📊 **Note on Unlisted Funds:** FMP does not track daily closing prices for `{', '.join(missing_price_tickers)}`. They remain fully integrated into your Lookthrough charts, but are mathematically excluded from the covariance modeling.")
             
         port_data = opt_data[opt_tickers]
         
@@ -283,7 +284,10 @@ if optimize_button:
         elif bench_clean in opt_data.columns: bench_data = opt_data[bench_clean]
         else: bench_data = pd.Series(dtype=float)
 
-    with st.spinner("Optimizing Computable Assets..."):
+    with st.spinner("Compiling Portfolio Matrix..."):
+        st.session_state.cleaned_weights = {}
+        
+        # MATHEMATICAL BYPASS: If there are enough valid stocks, run the optimization math.
         if not port_data.empty and len(opt_tickers) >= 2:
             mu = expected_returns.mean_historical_return(port_data)
             S = risk_models.sample_cov(port_data)
@@ -292,28 +296,30 @@ if optimize_button:
                 raw_weights = ef.max_sharpe() if "Max Sharpe" in opt_metric else ef.min_volatility()
                 st.session_state.cleaned_weights = ef.clean_weights()
             except:
-                st.warning("Optimization failed (constraints too tight?). Defaulting to Equal Weight.")
                 st.session_state.cleaned_weights = {t: 1.0/len(opt_tickers) for t in opt_tickers}
 
             st.session_state.mu, st.session_state.S = mu, S
             st.session_state.ret, st.session_state.vol, st.session_state.sharpe = ef.portfolio_performance()
             st.session_state.daily_returns = port_data.pct_change().dropna()
         else:
-            st.warning("Not enough tradable price history to run optimization math. Displaying Allocations only.")
-            st.session_state.cleaned_weights = {}
+            # THE GRACEFUL FALLBACK: If portfolio is 100% mutual funds, bypass math safely.
+            st.warning("⚠️ No daily price history available to run Volatility constraints. Displaying True Exposures and Allocations only.")
             st.session_state.mu, st.session_state.S = pd.Series(dtype=float), pd.DataFrame()
             st.session_state.ret, st.session_state.vol, st.session_state.sharpe = 0, 0, 0
             st.session_state.daily_returns = pd.DataFrame()
 
-        # Add back the un-optimizable tickers into the weights dictionary using their imported weights
+        # Safely compile the final Target Weights (mixing stocks and unlisted mutual funds)
         if st.session_state.imported_weights:
-            for mt in missing_price_tickers:
+            for mt in tickers: 
                 st.session_state.cleaned_weights[mt] = st.session_state.imported_weights.get(mt, 0.0)
-            
-            # Re-normalize total weights across ALL assets (Computable + Unlisted) to 100%
-            total_w = sum(st.session_state.cleaned_weights.values())
-            if total_w > 0:
-                st.session_state.cleaned_weights = {k: v/total_w for k, v in st.session_state.cleaned_weights.items()}
+        else:
+            for mt in missing_price_tickers:
+                st.session_state.cleaned_weights[mt] = 1.0/len(tickers)
+
+        # Re-normalize total weights across ALL assets to 100%
+        total_w = sum(st.session_state.cleaned_weights.values())
+        if total_w > 0:
+            st.session_state.cleaned_weights = {k: v/total_w for k, v in st.session_state.cleaned_weights.items()}
 
         st.session_state.asset_list = list(st.session_state.cleaned_weights.keys())
         st.session_state.bench_returns_static = bench_data.pct_change().dropna() if not bench_data.empty else None
@@ -345,11 +351,9 @@ if st.session_state.optimized:
                 else: custom_weights[t] = new_rem / (len(custom_weights) - 1)
         custom_weights[adj_asset] = new_w
     
-    # Calculate Metrics (Only for assets with mathematical data)
     computable_assets = [t for t in st.session_state.asset_list if t in st.session_state.mu.index]
     if computable_assets:
         comp_w_array = np.array([custom_weights[t] for t in computable_assets])
-        # Normalize weights just for the math subset
         comp_w_array = comp_w_array / comp_w_array.sum() if comp_w_array.sum() > 0 else comp_w_array
         
         c_ret = np.dot(comp_w_array, st.session_state.mu[computable_assets].values)
@@ -369,6 +373,8 @@ if st.session_state.optimized:
         curr_ret = np.dot(curr_w_array, st.session_state.mu[computable_assets].values)
         curr_vol = np.sqrt(np.dot(curr_w_array.T, np.dot(st.session_state.S.loc[computable_assets, computable_assets].values, curr_w_array)))
         curr_sharpe = (curr_ret - 0.02) / curr_vol if curr_vol > 0 else 0
+        
+    if st.session_state.imported_weights:
         curr_yield = sum(st.session_state.imported_weights.get(t, 0.0) * st.session_state.asset_meta.get(t, ('', '', 0.0, 1e9))[2] for t in st.session_state.asset_list)
         curr_income = curr_yield * st.session_state.portfolio_value_target
 
@@ -377,17 +383,17 @@ if st.session_state.optimized:
         with col_curr:
             st.markdown("#### 📉 Current Baseline")
             c1, c2 = st.columns(2)
-            c1.metric("Exp. Return", f"{curr_ret*100:.2f}%")
-            c1.metric("Sharpe Ratio", f"{curr_sharpe:.2f}")
-            c2.metric("Risk (Vol)", f"{curr_vol*100:.2f}%")
+            c1.metric("Exp. Return", f"{curr_ret*100:.2f}%" if computable_assets else "N/A")
+            c1.metric("Sharpe Ratio", f"{curr_sharpe:.2f}" if computable_assets else "N/A")
+            c2.metric("Risk (Vol)", f"{curr_vol*100:.2f}%" if computable_assets else "N/A")
             c2.metric("Ann. Income", f"${curr_income:,.2f}")
 
     with col_tgt if st.session_state.imported_weights else st.container():
         st.markdown("#### 📈 Optimized Target" if st.session_state.imported_weights else "#### 📊 Strategy Performance Overview")
         t1, t2 = st.columns(2)
-        t1.metric("Exp. Return", f"{c_ret*100:.2f}%", f"{(c_ret - curr_ret)*100:.2f}%" if st.session_state.imported_weights else None)
-        t1.metric("Sharpe Ratio", f"{c_sharpe:.2f}", f"{c_sharpe - curr_sharpe:.2f}" if st.session_state.imported_weights else None)
-        t2.metric("Risk (Vol)", f"{c_vol*100:.2f}%", f"{(c_vol - curr_vol)*100:.2f}%" if st.session_state.imported_weights else None, delta_color="inverse")
+        t1.metric("Exp. Return", f"{c_ret*100:.2f}%" if computable_assets else "N/A", f"{(c_ret - curr_ret)*100:.2f}%" if st.session_state.imported_weights and computable_assets else None)
+        t1.metric("Sharpe Ratio", f"{c_sharpe:.2f}" if computable_assets else "N/A", f"{c_sharpe - curr_sharpe:.2f}" if st.session_state.imported_weights and computable_assets else None)
+        t2.metric("Risk (Vol)", f"{c_vol*100:.2f}%" if computable_assets else "N/A", f"{(c_vol - curr_vol)*100:.2f}%" if st.session_state.imported_weights and computable_assets else None, delta_color="inverse")
         t2.metric("Ann. Income", f"${proj_income:,.2f}", f"${proj_income - curr_income:,.2f}" if st.session_state.imported_weights else None)
     
     st.markdown("---")
@@ -423,7 +429,7 @@ if st.session_state.optimized:
             
         with pie_col3:
             st.markdown("**Asset Correlation Matrix**")
-            if not st.session_state.daily_returns.empty:
+            if not st.session_state.daily_returns.empty and len(st.session_state.daily_returns.columns) > 1:
                 corr_matrix = st.session_state.daily_returns.corr()
                 num_assets = len(corr_matrix.columns)
                 show_numbers = num_assets <= 12
@@ -433,7 +439,7 @@ if st.session_state.optimized:
                 ax_corr.tick_params(axis='x', rotation=90, labelsize=font_size)
                 st.pyplot(fig_corr, clear_figure=True)
             else:
-                st.info("Correlation Matrix requires price history.")
+                st.info("Correlation Matrix requires price history from public exchanges.")
 
     with tab2:
         st.markdown("<br>", unsafe_allow_html=True)
