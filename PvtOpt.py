@@ -54,9 +54,9 @@ def fetch_fmp_profile(ticker, api_key):
     return {}
 
 @st.cache_data(ttl=86400)
-def fetch_fmp_lookthrough(ticker, is_mutual_fund, api_key):
-    endpoint = "mutual-fund-holder" if is_mutual_fund else "etf-holder"
-    url = f"https://financialmodelingprep.com/api/v3/{endpoint}/{ticker}?apikey={api_key}"
+def fetch_fmp_sector_weightings(ticker, api_key):
+    """Directly fetches the pre-calculated sector exposure of an ETF/Fund."""
+    url = f"https://financialmodelingprep.com/api/v3/etf-sector-weightings/{ticker}?apikey={api_key}"
     try:
         res = requests.get(url).json()
         if res and isinstance(res, list):
@@ -91,11 +91,12 @@ def build_asset_metadata(tickers, api_key, excel_df=None):
         is_fund = False
         is_mf = False
         
+        # 1. Fetch Profile
         profile = fetch_fmp_profile(t, api_key)
         
         if profile:
             sector = profile.get('sector', 'Unknown')
-            if sector == '' or sector is None: sector = 'Unknown'
+            if not sector: sector = 'Unknown'
             
             div = profile.get('lastDiv', 0.0)
             price = profile.get('price', 0.0)
@@ -113,28 +114,44 @@ def build_asset_metadata(tickers, api_key, excel_df=None):
             else:
                 if country == 'CA' or t.endswith('.TO'): asset_class = 'Canadian Equities'
                 elif country != 'US': asset_class = 'International Equities'
-        else:
-            if excel_df is not None:
-                row = excel_df[excel_df['Clean_Ticker'] == t]
-                if not row.empty:
-                    sector = row.iloc[0].get('Sector', 'Unknown')
-                    if pd.isna(sector): sector = 'Unknown'
-            
-            if t.endswith('.TO'): asset_class = 'Canadian Equities'
-            elif len(t) >= 5 and any(c.isdigit() for c in t): 
-                asset_class, is_mf = 'Fund/ETF', True 
+        
+        # 2. Fallback to Excel if FMP profile is missing or sector is Unknown
+        if excel_df is not None:
+            row = excel_df[excel_df['Clean_Ticker'] == t]
+            if not row.empty:
+                excel_sector = row.iloc[0].get('Sector', 'Unknown')
+                if pd.notna(excel_sector) and str(excel_sector).strip() != '' and str(excel_sector).lower() != 'nan':
+                    sector = str(excel_sector)
+        
+        if t.endswith('.TO') and asset_class == 'US Equities': asset_class = 'Canadian Equities'
+        if len(t) >= 5 and any(c.isdigit() for c in t): asset_class, is_mf = 'Fund/ETF', True 
         
         meta_dict[t] = (asset_class, sector, div_yield, 1e9)
         
+        # 3. True Lookthrough using Sector Endpoint
         if (is_fund or is_mf) and api_key:
-            holdings = fetch_fmp_lookthrough(t, is_mf, api_key)
-            if holdings:
+            sectors_data = fetch_fmp_sector_weightings(t, api_key)
+            if sectors_data:
                 fund_exposure = {}
-                for h in holdings:
-                    weight = h.get('weightPercentage', 0) / 100.0
-                    sub_sector = h.get('sector', sector) 
-                    if not sub_sector or sub_sector == '': sub_sector = sector
-                    fund_exposure[sub_sector] = fund_exposure.get(sub_sector, 0) + weight
+                for s in sectors_data:
+                    # FMP returns weights as strings like "25.5%"
+                    raw_w = s.get('weightPercentage', '0')
+                    try:
+                        w = float(str(raw_w).replace('%', '')) / 100.0
+                    except ValueError:
+                        w = 0.0
+                        
+                    sub_sec = s.get('sector', 'Unknown')
+                    if not sub_sec: sub_sec = 'Unknown'
+                    fund_exposure[sub_sec] = fund_exposure.get(sub_sec, 0) + w
+                
+                # Normalize weights to ensure they equal exactly 100%
+                total_weight = sum(fund_exposure.values())
+                if total_weight > 0:
+                    fund_exposure = {k: v/total_weight for k, v in fund_exposure.items()}
+                else:
+                    fund_exposure = {sector: 1.0}
+                    
                 lookthrough_dict[t] = fund_exposure
             else:
                 lookthrough_dict[t] = {sector: 1.0}
