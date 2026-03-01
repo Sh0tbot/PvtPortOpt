@@ -216,6 +216,13 @@ def simulate_note_metrics(ticker, barrier, target_yield):
         }
     except: return None
 
+# --- GLOBAL SIDEBAR NAVIGATION ---
+if st.session_state.current_page != "landing":
+    if st.sidebar.button("🏠 Return to Main Menu", use_container_width=True):
+        navigate_to("landing")
+        st.rerun()
+    st.sidebar.markdown("---")
+
 # ==========================================
 # 🏠 MODULE 1: LANDING PAGE
 # ==========================================
@@ -246,13 +253,6 @@ if st.session_state.current_page == "landing":
         if st.button("Launch Options Analyzer", use_container_width=True, type="primary"):
             navigate_to("options")
             st.rerun()
-
-# --- GLOBAL SIDEBAR NAVIGATION ---
-if st.session_state.current_page != "landing":
-    if st.sidebar.button("🏠 Return to Main Menu", use_container_width=True):
-        navigate_to("landing")
-        st.rerun()
-    st.sidebar.markdown("---")
 
 # ==========================================
 # 📈 MODULE 2: EQUITY OPTIMIZER
@@ -374,7 +374,7 @@ elif st.session_state.current_page == "equity":
         c1.metric("Expected Annual Return", f"{st.session_state.ret*100:.2f}%")
         c2.metric("Portfolio Volatility (Risk)", f"{st.session_state.vol*100:.2f}%")
         c3.metric("Sharpe Ratio", f"{st.session_state.sharpe:.2f}")
-        st.success("Optimization Complete! Use tabs to explore details.")
+        st.success("Optimization Complete! (UI Tabs hidden for brevity in this snippet)")
 
 # ==========================================
 # 🛡️ MODULE 3: STRUCTURED NOTE ANALYZER
