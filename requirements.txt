@@ -1,10 +1,10 @@
 streamlit
-yfinance
 pandas
 numpy
 matplotlib
 seaborn
 PyPortfolioOpt
-fpdf
-openpyxl
 requests
+fpdf
+yfinance
+pdfplumber
