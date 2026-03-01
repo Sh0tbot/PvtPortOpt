@@ -9,6 +9,7 @@ import datetime
 import requests
 import tempfile
 from fpdf import FPDF
+import yfinance as yf
 
 # --- UI CONFIGURATION ---
 st.set_page_config(page_title="Enterprise Portfolio Manager", layout="wide", page_icon="📈", initial_sidebar_state="expanded")
@@ -49,7 +50,7 @@ except KeyError:
     st.sidebar.error("⚠️ FMP API Key missing from Secrets!"); fmp_api_key = None
 
 # ==========================================
-# 🔌 STRICT FMP STABLE API ENGINE
+# 🔌 STRICT FMP STABLE API ENGINE (Main Portfolio)
 # ==========================================
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_stable_metadata(ticker, api_key):
@@ -116,17 +117,37 @@ def fetch_stable_history_full(tickers, api_key):
         except Exception: pass
     return pd.DataFrame(hist_dict).sort_index() if hist_dict else pd.DataFrame()
 
+# ==========================================
+# 🛡️ SOLACTIVE CUSTOM INDEX ENGINE (yfinance)
+# ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_fmp_index_data(symbol, api_key):
-    search_url = f"https://financialmodelingprep.com/stable/search-symbol?query={symbol}&apikey={api_key}"
+def fetch_solactive_yf(isin):
+    """
+    Fetches Solactive custom index data from Yahoo Finance using the Stuttgart (.SG) exchange suffix.
+    """
+    clean_isin = isin.strip().upper()
+    if not clean_isin.endswith(".SG"):
+        yf_ticker = f"{clean_isin}.SG"
+    else:
+        yf_ticker = clean_isin
+        
     try:
-        search_results = requests.get(search_url, timeout=10).json()
-        if not search_results: return None
-        ticker = search_results[0]['symbol']
-        quote_data = requests.get(f"https://financialmodelingprep.com/stable/quote/{ticker}?apikey={api_key}", timeout=10).json()
-        if not quote_data: return None
-        return {"name": quote_data[0].get("name"), "price": quote_data[0].get("price"), "symbol": ticker}
-    except: return None
+        ticker_obj = yf.Ticker(yf_ticker)
+        info = ticker_obj.info
+        current_price = info.get('regularMarketPrice', info.get('currentPrice', info.get('previousClose')))
+        name = info.get('shortName', info.get('longName', f"Solactive Index ({clean_isin})"))
+        
+        if not current_price:
+            hist = ticker_obj.history(period="5d")
+            if not hist.empty:
+                current_price = hist['Close'].iloc[-1]
+                
+        if current_price:
+            return {"name": name, "price": float(current_price), "symbol": yf_ticker}
+        return None
+    except Exception as e:
+        print(f"yfinance Error for {yf_ticker}: {e}")
+        return None
 
 # --- UTILITIES ---
 def calculate_barrier_metrics(current_price, strike_price, barrier_level_pct):
@@ -731,18 +752,20 @@ if st.session_state.get("optimized"):
 
     with tab6:
         st.subheader("🛡️ PAR Note Analysis Tool")
-        st.write("Monitor Principal at Risk (PAR) notes tied to custom Solactive indices.")
+        st.write("Monitor Principal at Risk (PAR) notes tied to custom Solactive indices via Yahoo Finance (.SG).")
+        
         
         sn_col1, sn_col2 = st.columns(2)
         with sn_col1:
-            index_query = st.text_input("Index Name or ISIN", value="SOLCD265", key="sn_index")
+            index_query = st.text_input("Index ISIN (e.g. DE000SL0Q3R3)", value="DE000SL0Q3R3", key="sn_index")
             strike_price = st.number_input("Initial Strike Level", value=1000.0, key="sn_strike")
         with sn_col2:
             barrier_pct = st.slider("Barrier Level (%)", 50, 90, 70, key="sn_barrier")
             
         if st.button("Calculate Safety Margin", type="secondary"):
-            with st.spinner("Querying FMP API..."):
-                data = fetch_fmp_index_data(index_query, fmp_api_key)
+            with st.spinner("Pulling data from Yahoo Finance (Stuttgart Exchange)..."):
+                data = fetch_solactive_yf(index_query)
+                
                 if data and data.get('price'):
                     current_index_price = data['price']
                     metrics = calculate_barrier_metrics(current_index_price, strike_price, barrier_pct)
@@ -750,8 +773,10 @@ if st.session_state.get("optimized"):
                     st.markdown("---")
                     st.metric(label=f"Current Level: {data['name']} ({data['symbol']})", value=f"{current_index_price:,.2f}")
                     
-                    if metrics['is_breached']: st.error(f"⚠️ BARRIER BREACHED: Index is below the barrier of {metrics['barrier_price']:,.2f}")
-                    else: st.success(f"✅ Buffer Intact: Index is {metrics['distance_to_barrier_pct']:.2f}% away from the barrier.")
+                    if metrics['is_breached']: 
+                        st.error(f"⚠️ BARRIER BREACHED: Index is below the barrier of {metrics['barrier_price']:,.2f}")
+                    else: 
+                        st.success(f"✅ Buffer Intact: Index is {metrics['distance_to_barrier_pct']:.2f}% away from the barrier.")
                         
                     df_summary = pd.DataFrame({
                         "Metric": ["Initial Strike", "Barrier Level", "Current Index Level", "Safety Margin"],
@@ -759,7 +784,7 @@ if st.session_state.get("optimized"):
                     })
                     st.table(df_summary)
                 else:
-                    st.error("Could not fetch data. Please check the symbol or ISIN.")
+                    st.error(f"Could not fetch data for {index_query}.SG from Yahoo Finance. Please verify the ISIN is correct.")
 
     # --- EXPORT & LEGAL ---
     st.markdown("---")
