@@ -93,11 +93,16 @@ def fetch_stable_history_full(tickers, api_key):
                 
                 if isinstance(data_list, list) and len(data_list) > 0:
                     df = pd.DataFrame(data_list)
-                    # Check for standardized column names
-                    if 'date' in df.columns and 'adjClose' in df.columns:
+                    
+                    # THE FIX: Check for 'date' and either 'adjClose' or 'close'
+                    if 'date' in df.columns:
                         df['date'] = pd.to_datetime(df['date'])
                         df.set_index('date', inplace=True)
-                        hist_dict[t] = df['adjClose']
+                        
+                        if 'adjClose' in df.columns:
+                            hist_dict[t] = df['adjClose']
+                        elif 'close' in df.columns:
+                            hist_dict[t] = df['close']
         except Exception as e: 
             print(f"History Error {t}: {e}")
             pass
@@ -235,7 +240,11 @@ if opt_button:
             sector = prof.get('sector', 'Unknown') or 'Unknown'
             is_fund = prof.get('isEtf', False) or prof.get('isFund', False) or (len(t) >= 5 and not t.endswith('.TO'))
             
-            meta_map[t] = (prof.get('lastDiv', 0) / prof.get('price', 1) if prof.get('price') else 0, sector, 'Fund' if is_fund else 'Equity')
+            # Robust extraction of dividend
+            div = prof.get('lastDiv', prof.get('lastDividend', 0))
+            price = prof.get('price', 1)
+            
+            meta_map[t] = (div / price if price else 0, sector, 'Fund' if is_fund else 'Equity')
             
             if is_fund:
                 h = fetch_stable_holdings(t, fmp_api_key)
