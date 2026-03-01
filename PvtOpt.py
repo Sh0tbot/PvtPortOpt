@@ -105,8 +105,13 @@ def fetch_stable_metadata(ticker, api_key):
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_stable_history_full(tickers, api_key):
     hist_dict = {}
+    
+    # Grab today's date dynamically for the 'to=' parameter
+    today_str = datetime.date.today().strftime('%Y-%m-%d')
+    
     for t in tickers:
-        url = f"https://financialmodelingprep.com/stable/historical-price-eod/full?symbol={t}&apikey={api_key}"
+        # THE FIX: Explicitly append '&from=1990-01-01&to={today}' so FMP doesn't default to 5 years
+        url = f"https://financialmodelingprep.com/stable/historical-price-eod/full?symbol={t}&from=1990-01-01&to={today_str}&apikey={api_key}"
         try:
             res = requests.get(url, timeout=10)
             if res.status_code == 200:
@@ -118,10 +123,13 @@ def fetch_stable_history_full(tickers, api_key):
                     if 'date' in df.columns:
                         df['date'] = pd.to_datetime(df['date'])
                         df.set_index('date', inplace=True)
+                        
                         df = df[~df.index.duplicated(keep='first')]
+                        
                         if 'adjClose' in df.columns: hist_dict[t] = df['adjClose']
                         elif 'close' in df.columns: hist_dict[t] = df['close']
         except Exception: pass
+        
     return pd.DataFrame(hist_dict).sort_index() if hist_dict else pd.DataFrame()
 
 # ==========================================
