@@ -32,78 +32,89 @@ try:
 except KeyError: 
     st.sidebar.error("⚠️ FMP API Key missing from Secrets!"); fmp_api_key = None
 
-# --- FMP PREMIUM (STABLE ARCHITECTURE) ENGINE ---
-@st.cache_data(ttl=86400)
+# ==========================================
+# 🔌 STRICT FMP STABLE API ENGINE
+# ==========================================
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_stable_metadata(ticker, api_key):
+    url = f"https://financialmodelingprep.com/stable/profile?symbol={ticker}&apikey={api_key}"
+    try:
+        res = requests.get(url, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            if isinstance(data, list) and len(data) > 0: return data[0]
+            elif isinstance(data, dict): return data
+    except Exception as e:
+        print(f"Metadata Error {ticker}: {e}")
+    return {}
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_stable_holdings(ticker, api_key):
+    url = f"https://financialmodelingprep.com/stable/etf/holdings?symbol={ticker}&apikey={api_key}"
+    try:
+        res = requests.get(url, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            if isinstance(data, list): return data
+    except Exception as e:
+        print(f"Holdings Error {ticker}: {e}")
+    return []
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_stable_sectors(ticker, api_key):
+    url = f"https://financialmodelingprep.com/stable/etf/sector-weightings?symbol={ticker}&apikey={api_key}"
+    try:
+        res = requests.get(url, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            if isinstance(data, list): return data
+    except Exception as e:
+        print(f"Sector Error {ticker}: {e}")
+    return []
+
+@st.cache_data(ttl=86400, show_spinner=False)
 def fetch_stable_history_full(tickers, api_key):
-    """Fetches maximum available history using the standard V3 API."""
+    """Fetches maximum available history strictly via /stable/ architecture."""
     hist_dict = {}
     for t in tickers:
-        # Standard V3 Historical Data Endpoint
-        url = f"https://financialmodelingprep.com/api/v3/historical-price-full/{t}?apikey={api_key}"
+        url = f"https://financialmodelingprep.com/stable/historical-price-eod/full?symbol={t}&apikey={api_key}"
         try:
-            res = requests.get(url)
+            res = requests.get(url, timeout=10)
             if res.status_code == 200:
                 data = res.json()
-                data_list = data.get('historical', [])
+                
+                # Robust parsing: Handle if FMP wraps it in 'historical' dict or returns list directly
+                if isinstance(data, dict) and 'historical' in data:
+                    data_list = data['historical']
+                elif isinstance(data, list):
+                    data_list = data
+                else:
+                    data_list = []
+                
                 if isinstance(data_list, list) and len(data_list) > 0:
                     df = pd.DataFrame(data_list)
+                    # Check for standardized column names
                     if 'date' in df.columns and 'adjClose' in df.columns:
                         df['date'] = pd.to_datetime(df['date'])
                         df.set_index('date', inplace=True)
                         hist_dict[t] = df['adjClose']
         except Exception as e: 
+            print(f"History Error {t}: {e}")
             pass
             
     return pd.DataFrame(hist_dict).sort_index() if hist_dict else pd.DataFrame()
 
-@st.cache_data(ttl=86400)
-def fetch_stable_holdings(ticker, api_key):
-    url = f"https://financialmodelingprep.com/stable/etf/holdings?symbol={ticker}&apikey={api_key}"
-    try:
-        res = requests.get(url).json()
-        if isinstance(res, list): return res
-    except: pass
-    return []
-
-@st.cache_data(ttl=86400)
-def fetch_stable_sectors(ticker, api_key):
-    url = f"https://financialmodelingprep.com/stable/etf/sector-weightings?symbol={ticker}&apikey={api_key}"
-    try:
-        res = requests.get(url).json()
-        if isinstance(res, list): return res
-    except: pass
-    return []
-
-@st.cache_data(ttl=86400)
-def fetch_stable_history_full(tickers, api_key):
-    """Fetches maximum available history for stress tests, ignoring date limits."""
-    hist_dict = {}
-    for t in tickers:
-        url = f"https://financialmodelingprep.com/stable/historical-price-eod/full?symbol={t}&apikey={api_key}"
-        try:
-            res = requests.get(url).json()
-            data_list = res.get('historical', res) if isinstance(res, dict) else res
-            if isinstance(data_list, list) and len(data_list) > 0:
-                df = pd.DataFrame(data_list)
-                if 'date' in df.columns and 'adjClose' in df.columns:
-                    df['date'] = pd.to_datetime(df['date'])
-                    df.set_index('date', inplace=True)
-                    hist_dict[t] = df['adjClose']
-        except: pass
-    return pd.DataFrame(hist_dict).sort_index() if hist_dict else pd.DataFrame()
-
-# --- NEW: STRUCTURED NOTES ENGINE ---
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_fmp_index_data(symbol, api_key):
     """Searches for Solactive/Custom indices and retrieves current price."""
     search_url = f"https://financialmodelingprep.com/stable/search-symbol?query={symbol}&apikey={api_key}"
     try:
-        search_results = requests.get(search_url).json()
+        search_results = requests.get(search_url, timeout=10).json()
         if not search_results: return None
         ticker = search_results[0]['symbol']
         
         quote_url = f"https://financialmodelingprep.com/stable/quote/{ticker}?apikey={api_key}"
-        quote_data = requests.get(quote_url).json()
+        quote_data = requests.get(quote_url, timeout=10).json()
         
         if not quote_data: return None
         return {
@@ -113,6 +124,7 @@ def fetch_fmp_index_data(symbol, api_key):
         }
     except: return None
 
+# --- UTILITIES ---
 def calculate_barrier_metrics(current_price, strike_price, barrier_level_pct):
     barrier_price = strike_price * (barrier_level_pct / 100)
     distance_to_barrier = ((current_price - barrier_price) / current_price) * 100
@@ -122,7 +134,6 @@ def calculate_barrier_metrics(current_price, strike_price, barrier_level_pct):
         "is_breached": current_price <= barrier_price
     }
 
-# --- PDF GENERATOR ---
 def generate_pdf_report(weights_dict, ret, vol, sharpe, port_val, rebal_df):
     pdf = FPDF()
     pdf.add_page()
@@ -161,7 +172,9 @@ def generate_pdf_report(weights_dict, ret, vol, sharpe, port_val, rebal_df):
         with open(tmp_pdf.name, "rb") as f:
             return f.read()
 
-# --- SIDEBAR GUI ---
+# ==========================================
+# 🎛️ SIDEBAR GUI
+# ==========================================
 st.sidebar.header("1. Setup")
 manual_tickers = st.sidebar.text_input("Tickers", "AAPL, MSFT, RY.TO")
 benchmark_ticker = st.sidebar.text_input("Benchmark:", "SPY")
@@ -244,7 +257,7 @@ if opt_button:
         full_data = fetch_stable_history_full(all_t, fmp_api_key)
 
         if full_data.empty:
-            st.error("🚨 FMP returned no data. Check API diagnostics.")
+            st.error("🚨 FMP returned no historical data. Try running a single ticker in the API Diagnostics tab.")
             st.stop()
 
         full_data = full_data.ffill().bfill()
@@ -280,7 +293,7 @@ if opt_button:
         st.session_state.optimized = True
 
 # ==========================================
-# 📈 DASHBOARD
+# 📈 DASHBOARD TABS
 # ==========================================
 if st.session_state.get("optimized"):
     st.markdown("---")
@@ -291,7 +304,6 @@ if st.session_state.get("optimized"):
     c3.metric("Sharpe Ratio", f"{st.session_state.sharpe:.2f}")
     st.markdown("---")
 
-    # ADDED T6 FOR STRUCTURED NOTES
     t1, t2, t3, t4, t5, t6 = st.tabs([
         "📊 Allocation & X-Ray", "⚖️ Rebalancing", "📉 Stress Tests", 
         "🔮 Monte Carlo", "📄 PDF Report", "🛡️ Structured Notes"
@@ -441,7 +453,6 @@ if st.session_state.get("optimized"):
                     else:
                         st.success(f"✅ Buffer Intact: The index is {metrics['distance_to_barrier_pct']:.2f}% away from the barrier.")
                         
-                    # Summary table for the PAR note
                     df_summary = pd.DataFrame({
                         "Metric": ["Initial Strike", "Barrier Level", "Current Index Level", "Safety Margin"],
                         "Value": [f"{strike_price:,.2f}", f"{metrics['barrier_price']:,.2f}", 
