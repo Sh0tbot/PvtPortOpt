@@ -453,7 +453,9 @@ elif st.session_state.current_page == "equity":
             port_data = opt_data[valid_tickers]
             
             if autobench:
-                st.session_state.proxy_data = opt_data[[p for p in BENCH_MAP.values() if p in opt_data.columns]]
+                # The set() function forces Pandas to only grab one copy of 'SPY'
+                unique_proxies = list(set([p for p in BENCH_MAP.values() if p in opt_data.columns]))
+                st.session_state.proxy_data = opt_data[unique_proxies]
                 bench_data = pd.Series(dtype=float)
             elif bench_clean in opt_data.columns: bench_data = opt_data[bench_clean]
             else: bench_data = pd.Series(dtype=float)
@@ -575,7 +577,11 @@ elif st.session_state.current_page == "equity":
                 if w > 0:
                     proxy_ticker = BENCH_MAP[ac]
                     if proxy_ticker in aligned_proxies.columns:
-                        bench_daily = bench_daily + (aligned_proxies[proxy_ticker] * w)
+                        proxy_series = aligned_proxies[proxy_ticker]
+                        # Bulletproof safeguard: If Pandas still somehow returns a DataFrame, force it to a 1D Series
+                        if isinstance(proxy_series, pd.DataFrame): 
+                            proxy_series = proxy_series.iloc[:, 0]
+                        bench_daily = bench_daily + (proxy_series * w)
                         
             active_bench_returns = bench_daily
             bench_label = "Auto-Blended Benchmark"
