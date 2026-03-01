@@ -107,6 +107,10 @@ def fetch_stable_history_full(tickers, api_key):
                     if 'date' in df.columns:
                         df['date'] = pd.to_datetime(df['date'])
                         df.set_index('date', inplace=True)
+                        
+                        # THE FIX: Strip out any duplicate dates from the FMP response
+                        df = df[~df.index.duplicated(keep='first')]
+                        
                         if 'adjClose' in df.columns: hist_dict[t] = df['adjClose']
                         elif 'close' in df.columns: hist_dict[t] = df['close']
         except Exception: pass
