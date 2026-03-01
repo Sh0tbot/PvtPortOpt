@@ -34,14 +34,28 @@ except KeyError:
 
 # --- FMP PREMIUM (STABLE ARCHITECTURE) ENGINE ---
 @st.cache_data(ttl=86400)
-def fetch_stable_metadata(ticker, api_key):
-    url = f"https://financialmodelingprep.com/stable/profile?symbol={ticker}&apikey={api_key}"
-    try:
-        res = requests.get(url).json()
-        if isinstance(res, list) and len(res) > 0: return res[0]
-        elif isinstance(res, dict): return res
-    except: pass
-    return {}
+def fetch_stable_history_full(tickers, api_key):
+    """Fetches maximum available history using the standard V3 API."""
+    hist_dict = {}
+    for t in tickers:
+        # Swapped to the standard v3 endpoint which is more permissive across API tiers
+        url = f"https://financialmodelingprep.com/api/v3/historical-price-full/{t}?apikey={api_key}"
+        try:
+            res = requests.get(url)
+            if res.status_code == 200:
+                data = res.json()
+                data_list = data.get('historical', [])
+                if isinstance(data_list, list) and len(data_list) > 0:
+                    df = pd.DataFrame(data_list)
+                    if 'date' in df.columns and 'adjClose' in df.columns:
+                        df['date'] = pd.to_datetime(df['date'])
+                        df.set_index('date', inplace=True)
+                        hist_dict[t] = df['adjClose']
+        except Exception as e: 
+            print(f"Error fetching {t}: {e}")
+            pass
+            
+    return pd.DataFrame(hist_dict).sort_index() if hist_dict else pd.DataFrame()
 
 @st.cache_data(ttl=86400)
 def fetch_stable_holdings(ticker, api_key):
