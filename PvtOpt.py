@@ -26,18 +26,17 @@ try:
 except KeyError: 
     st.sidebar.error("⚠️ FMP API Key missing from Secrets!"); fmp_api_key = None
 
-
 # --- SIDEBAR GUI ---
 st.sidebar.header("1. Setup")
 manual_tickers = st.sidebar.text_input("Tickers", "AAPL, RY.TO")
 time_range = st.sidebar.selectbox("Horizon", ("1 Year", "3 Years", "5 Years"), index=1)
 
 st.sidebar.markdown("---")
-diagnostic_mode = st.sidebar.toggle("🛠️ Enable API Diagnostic Mode", value=False)
+diagnostic_mode = st.sidebar.toggle("🛠️ Enable API Diagnostic Mode", value=True)
 test_ticker = st.sidebar.text_input("Diagnostic Test Ticker", "RY.TO")
 
 # ==========================================
-# 🛠️ DIAGNOSTIC CONSOLE
+# 🛠️ DIAGNOSTIC CONSOLE & CSV EXPORTER
 # ==========================================
 if diagnostic_mode:
     st.title("🛠️ Raw API Diagnostic Console")
@@ -47,7 +46,7 @@ if diagnostic_mode:
         st.error("No API key found to test.")
         st.stop()
 
-    if st.button("Run Diagnostics"):
+    if st.button("Run Diagnostics & Generate CSV"):
         endpoints = {
             "V3 Profile (Legacy)": f"https://financialmodelingprep.com/api/v3/profile/{test_ticker}?apikey={fmp_api_key}",
             "V4 Company Outlook (Premium)": f"https://financialmodelingprep.com/api/v4/company-outlook?symbol={test_ticker}&apikey={fmp_api_key}",
@@ -57,29 +56,35 @@ if diagnostic_mode:
             "V4 ETF Holders": f"https://financialmodelingprep.com/api/v4/etf-holder?symbol={test_ticker}&apikey={fmp_api_key}"
         }
 
+        csv_data = []
+
         for name, url in endpoints.items():
             st.markdown(f"### {name}")
-            safe_url = url.replace(fmp_api_key, "YOUR_API_KEY")
+            safe_url = url.replace(fmp_api_key, "[HIDDEN_API_KEY]")
             st.code(f"GET {safe_url}")
             
             try:
                 res = requests.get(url)
                 status = res.status_code
+                response_text = res.text
                 
-                if status == 200:
-                    st.success(f"Status: {status} OK")
-                elif status == 403:
-                    st.error(f"Status: {status} Forbidden (Permission Denied)")
-                elif status == 404:
-                    st.warning(f"Status: {status} Not Found (Ticker might not exist on this endpoint)")
-                else:
-                    st.error(f"Status: {status}")
+                # Print Status to Screen
+                if status == 200: st.success(f"Status: {status} OK")
+                elif status == 403: st.error(f"Status: {status} Forbidden")
+                else: st.warning(f"Status: {status}")
                 
-                # Try to parse JSON to see the exact error or payload
+                # Append to our CSV Payload
+                csv_data.append({
+                    "Endpoint": name,
+                    "Status Code": status,
+                    "Safe URL": safe_url,
+                    "Raw JSON Response": response_text
+                })
+
+                # Try to parse JSON for screen display
                 try:
                     data = res.json()
                     with st.expander("View Raw JSON Response"):
-                        # If it's a massive list (like history), just show the first 3 items so we don't crash the browser
                         if isinstance(data, list) and len(data) > 5:
                             st.write(f"*List contains {len(data)} items. Showing first 3:*")
                             st.json(data[:3])
@@ -90,15 +95,34 @@ if diagnostic_mode:
                             st.json(preview)
                         else:
                             st.json(data)
-                except Exception as json_e:
-                    st.error(f"Could not parse JSON. Raw text: {res.text}")
+                except Exception:
+                    st.error("Could not parse JSON. Check CSV for raw text.")
                     
             except Exception as req_e:
                 st.error(f"Request failed entirely: {req_e}")
+                csv_data.append({
+                    "Endpoint": name,
+                    "Status Code": "CRASH",
+                    "Safe URL": safe_url,
+                    "Raw JSON Response": str(req_e)
+                })
             
             st.markdown("---")
             
-    st.stop() # Stops the rest of the app from running while in diagnostic mode
+        # --- GENERATE CSV DOWNLOAD ---
+        df_diag = pd.DataFrame(csv_data)
+        csv_str = df_diag.to_csv(index=False)
+        
+        st.success("✅ Diagnostic complete. Data compiled successfully.")
+        st.download_button(
+            label="📥 Download Diagnostic CSV",
+            data=csv_str,
+            file_name=f"FMP_Diagnostics_{test_ticker}.csv",
+            mime="text/csv",
+            type="primary"
+        )
+            
+    st.stop() 
 
 # ==========================================
 # 📈 NORMAL APP LOGIC
