@@ -79,6 +79,36 @@ def fetch_stable_history_full(tickers, api_key):
         except: pass
     return pd.DataFrame(hist_dict).sort_index() if hist_dict else pd.DataFrame()
 
+# --- NEW: STRUCTURED NOTES ENGINE ---
+@st.cache_data(ttl=3600)
+def fetch_fmp_index_data(symbol, api_key):
+    """Searches for Solactive/Custom indices and retrieves current price."""
+    search_url = f"https://financialmodelingprep.com/stable/search-symbol?query={symbol}&apikey={api_key}"
+    try:
+        search_results = requests.get(search_url).json()
+        if not search_results: return None
+        ticker = search_results[0]['symbol']
+        
+        quote_url = f"https://financialmodelingprep.com/stable/quote/{ticker}?apikey={api_key}"
+        quote_data = requests.get(quote_url).json()
+        
+        if not quote_data: return None
+        return {
+            "name": quote_data[0].get("name"),
+            "price": quote_data[0].get("price"),
+            "symbol": ticker
+        }
+    except: return None
+
+def calculate_barrier_metrics(current_price, strike_price, barrier_level_pct):
+    barrier_price = strike_price * (barrier_level_pct / 100)
+    distance_to_barrier = ((current_price - barrier_price) / current_price) * 100
+    return {
+        "barrier_price": barrier_price,
+        "distance_to_barrier_pct": distance_to_barrier,
+        "is_breached": current_price <= barrier_price
+    }
+
 # --- PDF GENERATOR ---
 def generate_pdf_report(weights_dict, ret, vol, sharpe, port_val, rebal_df):
     pdf = FPDF()
@@ -100,14 +130,12 @@ def generate_pdf_report(weights_dict, ret, vol, sharpe, port_val, rebal_df):
     pdf.cell(200, 8, txt="2. Target Allocation & Rebalancing Actions", ln=True)
     pdf.set_font("Arial", 'B', 9)
     
-    # Table Header
     col_widths = [30, 30, 40]
     headers = ["Ticker", "Target %", "Target Value ($)"]
     for i in range(len(headers)):
         pdf.cell(col_widths[i], 8, headers[i], border=1, align='C')
     pdf.ln()
     
-    # Table Body
     pdf.set_font("Arial", '', 9)
     for _, row in rebal_df.iterrows():
         pdf.cell(col_widths[0], 8, str(row['Ticker']), border=1)
@@ -174,7 +202,6 @@ if opt_button:
 
     all_t = list(set(tickers + [benchmark_ticker.strip().upper()]))
 
-    # Step 1: Metadata & Lookthrough
     with st.spinner("Accessing FMP Stable X-Ray Engine..."):
         meta_map, holdings_map, lookthrough_map = {}, {}, {}
         for t in all_t:
@@ -200,7 +227,6 @@ if opt_button:
                 else: lookthrough_map[t] = {sector: 1.0}
             else: lookthrough_map[t] = {sector: 1.0}
 
-    # Step 2: Historical Pricing (Max History for Stress Tests)
     with st.spinner("Downloading Deep Historical Pricing..."):
         full_data = fetch_stable_history_full(all_t, fmp_api_key)
 
@@ -210,7 +236,6 @@ if opt_button:
 
         full_data = full_data.ffill().bfill()
         
-        # Slice data for the optimization horizon
         end_d = datetime.date.today()
         start_d = end_d - datetime.timedelta(days=int(time_range.split()[0])*365)
         opt_data = full_data.loc[start_d.strftime("%Y-%m-%d"):end_d.strftime("%Y-%m-%d")]
@@ -247,14 +272,17 @@ if opt_button:
 if st.session_state.get("optimized"):
     st.markdown("---")
     
-    # Portfolio Top Line Metrics
     c1, c2, c3 = st.columns(3)
     c1.metric("Expected Annual Return", f"{st.session_state.ret*100:.2f}%")
     c2.metric("Portfolio Volatility (Risk)", f"{st.session_state.vol*100:.2f}%")
     c3.metric("Sharpe Ratio", f"{st.session_state.sharpe:.2f}")
     st.markdown("---")
 
-    t1, t2, t3, t4, t5 = st.tabs(["📊 Allocation & X-Ray", "⚖️ Rebalancing", "📉 Stress Tests", "🔮 Monte Carlo", "📄 Generate PDF Report"])
+    # ADDED T6 FOR STRUCTURED NOTES
+    t1, t2, t3, t4, t5, t6 = st.tabs([
+        "📊 Allocation & X-Ray", "⚖️ Rebalancing", "📉 Stress Tests", 
+        "🔮 Monte Carlo", "📄 PDF Report", "🛡️ Structured Notes"
+    ])
     
     with t1:
         st.subheader("True Exposure (FMP Lookthrough)")
@@ -280,7 +308,7 @@ if st.session_state.get("optimized"):
     with t2:
         st.subheader("Action List")
         rebal_data = [{'Ticker': t, 'Target %': f"{w*100:.2f}%", 'Target $': f"${w*st.session_state.p_val:,.2f}"} 
-                 for t, w in st.session_state.cleaned_weights.items()]
+                  for t, w in st.session_state.cleaned_weights.items()]
         rebal_df = pd.DataFrame(rebal_data)
         st.dataframe(rebal_df, use_container_width=True, hide_index=True)
 
@@ -304,11 +332,9 @@ if st.session_state.get("optimized"):
                     port_slice = slice_data[active_assets]
                     port_returns = port_slice.pct_change().dropna()
                     
-                    # Calculate cumulative return for portfolio
                     port_cum = (1 + port_returns.dot(weights_array)).cumprod() - 1
                     port_drop = port_cum.iloc[-1]
                     
-                    # Benchmark
                     bench_drop = "N/A"
                     bench = st.session_state.bench_ticker
                     if bench in slice_data.columns:
@@ -334,13 +360,12 @@ if st.session_state.get("optimized"):
             results = np.zeros((days, sims))
             results[0] = st.session_state.p_val
             
-            # Simple Geometric Brownian Motion
             for t in range(1, days):
                 shock = np.random.normal(loc=st.session_state.ret * dt, scale=st.session_state.vol * np.sqrt(dt), size=sims)
                 results[t] = results[t-1] * np.exp(shock)
                 
             fig_mc, ax_mc = plt.subplots(figsize=(10, 5))
-            ax_mc.plot(results[:, :50], color='blue', alpha=0.05) # Plot first 50 lines for speed
+            ax_mc.plot(results[:, :50], color='blue', alpha=0.05)
             ax_mc.plot(np.percentile(results, 50, axis=1), color='red', linewidth=2, label='Median Expected')
             ax_mc.plot(np.percentile(results, 5, axis=1), color='orange', linewidth=2, linestyle='--', label='5th Percentile (Pessimistic)')
             ax_mc.plot(np.percentile(results, 95, axis=1), color='green', linewidth=2, linestyle='--', label='95th Percentile (Optimistic)')
@@ -375,3 +400,40 @@ if st.session_state.get("optimized"):
             mime="application/pdf",
             type="primary"
         )
+        
+    with t6:
+        st.subheader("🛡️ PAR Note Analysis Tool")
+        st.write("Monitor Principal at Risk (PAR) notes tied to custom Solactive indices.")
+        
+        sn_col1, sn_col2 = st.columns(2)
+        with sn_col1:
+            index_query = st.text_input("Index Name or ISIN", value="SOLCD265", key="sn_index")
+            strike_price = st.number_input("Initial Strike Level", value=1000.0, key="sn_strike")
+        with sn_col2:
+            barrier_pct = st.slider("Barrier Level (%)", 50, 90, 70, key="sn_barrier")
+            
+        if st.button("Calculate Safety Margin", type="secondary"):
+            with st.spinner("Querying FMP API..."):
+                data = fetch_fmp_index_data(index_query, fmp_api_key)
+                
+                if data and data.get('price'):
+                    current_index_price = data['price']
+                    metrics = calculate_barrier_metrics(current_index_price, strike_price, barrier_pct)
+                    
+                    st.markdown("---")
+                    st.metric(label=f"Current Level: {data['name']} ({data['symbol']})", value=f"{current_index_price:,.2f}")
+                    
+                    if metrics['is_breached']:
+                        st.error(f"⚠️ BARRIER BREACHED: The index is currently below the barrier level of {metrics['barrier_price']:,.2f}")
+                    else:
+                        st.success(f"✅ Buffer Intact: The index is {metrics['distance_to_barrier_pct']:.2f}% away from the barrier.")
+                        
+                    # Summary table for the PAR note
+                    df_summary = pd.DataFrame({
+                        "Metric": ["Initial Strike", "Barrier Level", "Current Index Level", "Safety Margin"],
+                        "Value": [f"{strike_price:,.2f}", f"{metrics['barrier_price']:,.2f}", 
+                                  f"{current_index_price:,.2f}", f"{metrics['distance_to_barrier_pct']:.2f}%"]
+                    })
+                    st.table(df_summary)
+                else:
+                    st.error("Could not fetch data for this index. Please double check the symbol or ISIN.")
