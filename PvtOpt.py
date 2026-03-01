@@ -407,10 +407,10 @@ elif st.session_state.current_page == "notes":
                     results.append({
                         "Note Issuer": extracted["Issuer"],
                         "Underlying Index": extracted["Index"],
-                        "Max Target Yield": f"{extracted['Max Target Yield (%)']:.2f}%",
-                        "Barrier Level": f"{extracted['Barrier (%)']}%",
-                        "Prob. of Capital Loss": f"{metrics['Prob. of Capital Loss']:.1f}%" if metrics else "N/A",
-                        "Expected Ann. Yield": f"{metrics['Expected Ann. Yield']:.2f}%" if metrics else "N/A",
+                        "Max Target Yield": extracted['Max Target Yield (%)'],
+                        "Barrier Level": extracted['Barrier (%)'],
+                        "Prob. of Capital Loss": metrics['Prob. of Capital Loss'] if metrics else np.nan,
+                        "Expected Ann. Yield": metrics['Expected Ann. Yield'] if metrics else np.nan,
                         "Structure Score": int(metrics["Structure Score"]) if metrics else 0
                     })
                 else:
@@ -422,10 +422,16 @@ elif st.session_state.current_page == "notes":
                 st.markdown("### 🏆 Structured Note Rankings")
                 st.write("Notes are ranked out of 100 based on the optimal balance of generous yield payouts versus the mathematical probability of breaching the downside barrier.")
                 
-                # Highlight best scores in Green, worst risks in Red
+                # Use Pandas Styler to format floats into percentage strings visually, while keeping math intact for gradients
                 st.dataframe(
-                    df_notes.style.background_gradient(subset=["Structure Score"], cmap="Greens")
-                                 .background_gradient(subset=["Prob. of Capital Loss"], cmap="Reds"),
+                    df_notes.style.format({
+                        "Max Target Yield": "{:.2f}%",
+                        "Barrier Level": "{:.1f}%",
+                        "Prob. of Capital Loss": "{:.1f}%",
+                        "Expected Ann. Yield": "{:.2f}%"
+                    }, na_rep="N/A")
+                    .background_gradient(subset=["Structure Score"], cmap="Greens")
+                    .background_gradient(subset=["Prob. of Capital Loss"], cmap="Reds"),
                     use_container_width=True
                 )
                 
