@@ -548,7 +548,8 @@ elif st.session_state.current_page == "notes":
                             base_tickers = list(base_weights.keys())
                     except: pass
                 
-                base_hist = yf.download(base_tickers, period="3y", progress=False)['Close'].ffill()                if isinstance(base_hist, pd.Series): base_hist = base_hist.to_frame(name=base_tickers[0])
+                base_hist = yf.download(base_tickers, period="3y", progress=False)['Close'].ffill()
+                if isinstance(base_hist, pd.Series): base_hist = base_hist.to_frame(name=base_tickers[0])
                 base_daily_returns = base_hist.pct_change().dropna()
                 
                 weight_array = np.array([base_weights.get(c, 0) for c in base_daily_returns.columns])
