@@ -125,12 +125,14 @@ def fetch_stable_history_full(tickers, api_key):
     return pd.DataFrame(hist_dict).sort_index() if hist_dict else pd.DataFrame()
 
 def parse_note_pdf(file_bytes, filename):
+    """Extracts note features and uses keyword heuristics to guess liquid proxies."""
     try:
         with pdfplumber.open(file_bytes) as pdf:
             text = ""
             for page in pdf.pages[:3]:
                 text += page.extract_text() + "\n"
                 
+        # 1. Identify Issuer
         issuer = "Unknown"
         if "Royal Bank" in text or "RBC" in text: issuer = "RBC"
         elif "Bank of Nova Scotia" in text or "Scotiabank" in text: issuer = "Scotiabank"
@@ -139,51 +141,69 @@ def parse_note_pdf(file_bytes, filename):
         elif "Bank of Montreal" in text or "BMO" in text: issuer = "BMO"
         elif "National Bank" in text or "NBC" in text: issuer = "NBC"
         
-        index_name, ticker = "Unknown Index", None
-        if "Blue Chip II AR" in text:
-            index_name, ticker = "Solactive Canada Blue Chip II AR", "SOLCB2AR.SG"
-        elif "Telecommunications 145 AR" in text:
-            index_name, ticker = "Solactive Canada Telecom 145 AR", "SOLCT145.SG"
-        elif "Bank 30 AR" in text:
-            index_name, ticker = "Solactive EW Canada Bank 30 AR", "SOLCBE30.SG"
-        elif "Diversified Equity Index 265 AR" in text:
-            index_name, ticker = "Solactive Cdn Large Cap Div 265 AR", "SOLCD265.SG"
-        elif "Hedged 133 AR" in text:
-            index_name, ticker = "Solactive US Div EW Hedged 133 AR", "SUSDD133.SG"
-        elif "Canada Banks 5% AR" in text:
-            index_name, ticker = "Solactive EW Canada Banks 5% AR", "SOLCBEW5.SG"
+        # 2. Extract Index Name
+        index_name = "Unknown Index"
+        index_match = re.search(r'(Solactive[\w\s]+(?:Index|AR|TR|GTR))', text, re.IGNORECASE)
+        if index_match:
+            index_name = index_match.group(1).strip().replace('\n', ' ')
             
+        # 3. Smart Proxy Heuristics (Keyword Based)
+        proxy = "XIU.TO" # Default fallback (TSX 60)
+        idx_lower = index_name.lower()
+        
+        if "bank" in idx_lower: proxy = "ZEB.TO"
+        elif "telecom" in idx_lower: proxy = "XTC.TO"
+        elif "us " in idx_lower or "u.s." in idx_lower or "sp500" in idx_lower or "s&p" in idx_lower:
+            proxy = "ZUE.TO" if "hedged" in idx_lower else "ZSP.TO"
+        elif "utility" in idx_lower or "utilities" in idx_lower: proxy = "ZUT.TO"
+        elif "energy" in idx_lower or "pipeline" in idx_lower: proxy = "XEG.TO"
+        elif "real estate" in idx_lower or "reit" in idx_lower: proxy = "ZRE.TO"
+        elif "tech" in idx_lower: proxy = "XIT.TO"
+            
+        # 4. Extract Barrier (With Normalizer)
         barrier = 100.0
-        barrier_match = re.search(r'(?:Barrier Level|Barrier|Protection Barrier).*?(\d{2,3}(?:\.\d{1,2})?)%', text, re.IGNORECASE)
+        barrier_match = re.search(r'(?:Barrier Level|Barrier|Protection Barrier|Contingent Protection).*?(\d{2,3}(?:\.\d{1,2})?)%', text, re.IGNORECASE)
         if barrier_match:
             barrier = float(barrier_match.group(1))
         else:
             drawdown_match = re.search(r'(?:Barrier|greater than or equal to).*?(-\d{2}(?:\.\d{1,2})?)%', text, re.IGNORECASE)
-            if drawdown_match:
-                barrier = 100.0 + float(drawdown_match.group(1))
+            if drawdown_match: barrier = 100.0 + float(drawdown_match.group(1))
                 
         if issuer == "RBC" and "100% Principal Protection" in text: barrier = 100.0
+        if barrier <= 50.0: barrier = 100.0 - barrier
             
+        # 5. Extract Stated Max Yield
         coupon = 0.0
-        if issuer == "BMO": coupon = 8.95
-        elif issuer == "TD": coupon = 14.50
-        elif issuer == "Scotiabank": coupon = 8.52
-        elif issuer == "NBC": coupon = 7.50
-        elif issuer == "CIBC": coupon = 6.10
-        elif issuer == "RBC": coupon = 10.87
+        yield_match = re.search(r'(?:Fixed Return|Coupon|Yield|per annum).*?(\d{1,2}\.\d{1,2})%', text, re.IGNORECASE)
+        if yield_match:
+            coupon = float(yield_match.group(1))
+        else:
+            if issuer == "BMO": coupon = 8.95
+            elif issuer == "TD": coupon = 14.50
+            elif issuer == "Scotiabank": coupon = 8.52
+            elif issuer == "NBC": coupon = 7.50
+            elif issuer == "CIBC": coupon = 6.10
+            elif issuer == "RBC": coupon = 10.87
         
         return {
-            "Filename": filename, "Issuer": issuer, "Index": index_name,
-            "Ticker": ticker, "Barrier (%)": barrier, "Max Target Yield (%)": coupon
+            "Note Issuer": issuer,
+            "Underlying Index": index_name,
+            "Proxy ETF": proxy,
+            "Barrier (%)": barrier,
+            "Target Yield (%)": coupon
         }
     except Exception as e:
-        return {"Filename": filename, "Error": str(e)}
+        return {"Note Issuer": "Error", "Underlying Index": str(e), "Proxy ETF": "XIU.TO", "Barrier (%)": 75.0, "Target Yield (%)": 8.0}
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def simulate_note_metrics(ticker, barrier, target_yield):
+def simulate_note_metrics(ticker, proxy_ticker, barrier, target_yield):
+    """Runs a 5000-path Monte Carlo using the index or a liquid proxy."""
     try:
         hist = yf.Ticker(ticker).history(period="3y")['Close']
-        if hist.empty or len(hist) < 100: return None
+        if hist.empty or len(hist) < 100:
+            hist = yf.Ticker(proxy_ticker).history(period="3y")['Close']
+            
+        if hist.empty: return None
         
         daily_returns = hist.pct_change().dropna()
         mu = daily_returns.mean() * 252
@@ -214,7 +234,89 @@ def simulate_note_metrics(ticker, barrier, target_yield):
             "Expected Ann. Yield": exp_yield,
             "Structure Score": score
         }
-    except: return None
+    except Exception as e: 
+        print(f"Simulation Error: {e}")
+        return None
+
+def generate_pdf_report(weights_dict, ret, vol, sharpe, sortino, alpha, beta, port_yield, income, stress_results, display_trade, fig_ef, fig_wealth, fig_mc, is_bl=False, bench_label="Benchmark"):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", 'B', 16)
+    title = "Portfolio Strategy & Execution Report" if not is_bl else "Portfolio Strategy Report (Black-Litterman)"
+    pdf.cell(200, 10, txt=title, ln=True, align='C')
+    pdf.ln(5)
+    
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(200, 8, txt="1. Core Performance & Income Metrics", ln=True)
+    pdf.set_font("Arial", '', 11)
+    pdf.cell(95, 8, txt=f"Expected Annual Return: {ret*100:.2f}%")
+    pdf.cell(95, 8, txt=f"Annual Volatility (Risk): {vol*100:.2f}%", ln=True)
+    pdf.cell(95, 8, txt=f"Sharpe Ratio: {sharpe:.2f}")
+    pdf.cell(95, 8, txt=f"Sortino Ratio: {sortino:.2f}", ln=True)
+    pdf.cell(95, 8, txt=f"Alpha: {alpha*100:.2f}%" if not np.isnan(alpha) else "Alpha: N/A")
+    pdf.cell(95, 8, txt=f"Beta: {beta:.2f}" if not np.isnan(beta) else "Beta: N/A", ln=True)
+    pdf.cell(95, 8, txt=f"Portfolio Dividend Yield: {port_yield*100:.2f}%")
+    pdf.cell(95, 8, txt=f"Proj. Annual Income: ${income:,.2f}", ln=True)
+    pdf.ln(5)
+    
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(200, 8, txt=f"2. Historical Scenario Analysis ({bench_label})", ln=True)
+    pdf.set_font("Arial", 'B', 9)
+    pdf.cell(80, 8, "Historical Event", border=1, align='C')
+    pdf.cell(55, 8, "Portfolio Return", border=1, align='C')
+    pdf.cell(55, 8, "Benchmark Return", border=1, align='C')
+    pdf.ln()
+    pdf.set_font("Arial", '', 9)
+    for res in stress_results:
+        pdf.cell(80, 8, res['Event'], border=1)
+        pdf.cell(55, 8, f"{res['Portfolio Return']*100:.2f}%" if pd.notnull(res['Portfolio Return']) else "N/A", border=1, align='C')
+        pdf.cell(55, 8, f"{res['Benchmark Return']*100:.2f}%" if pd.notnull(res['Benchmark Return']) else "N/A", border=1, align='C')
+        pdf.ln()
+    pdf.ln(5)
+
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(200, 8, txt="3. Efficient Frontier Profile", ln=True)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_ef:
+        fig_ef.savefig(tmp_ef.name, format="png", bbox_inches="tight", dpi=150)
+        pdf.image(tmp_ef.name, x=15, w=160)
+
+    pdf.add_page()
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(200, 8, txt="4. Target Allocation & Rebalancing Actions", ln=True)
+    pdf.set_font("Arial", 'B', 9)
+    pdf.cell(30, 8, "Ticker", border=1, align='C')
+    pdf.cell(25, 8, "Target %", border=1, align='C')
+    pdf.cell(40, 8, "Current Val ($)", border=1, align='C')
+    pdf.cell(40, 8, "Target Val ($)", border=1, align='C')
+    pdf.cell(50, 8, "Action Required", border=1, align='C')
+    pdf.ln()
+    pdf.set_font("Arial", '', 9)
+    for _, row in display_trade.iterrows():
+        pdf.cell(30, 8, str(row['Ticker']), border=1)
+        pdf.cell(25, 8, str(row['Target %']), border=1, align='C')
+        pdf.cell(40, 8, str(row['Current Val ($)']), border=1, align='R')
+        pdf.cell(40, 8, str(row['Target Val ($)']), border=1, align='R')
+        pdf.cell(50, 8, str(row['Trade Action']), border=1, align='C')
+        pdf.ln()
+    pdf.ln(5)
+
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(200, 8, txt=f"5. Historical Backtest ($10,000 Growth vs {bench_label})", ln=True)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_wealth:
+        fig_wealth.savefig(tmp_wealth.name, format="png", bbox_inches="tight", dpi=150)
+        pdf.image(tmp_wealth.name, x=15, w=160)
+        
+    pdf.ln(85)
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(200, 8, txt="6. Monte Carlo Forecast", ln=True)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_mc:
+        fig_mc.savefig(tmp_mc.name, format="png", bbox_inches="tight", dpi=150)
+        pdf.image(tmp_mc.name, x=15, w=160)
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
+        pdf.output(tmp_pdf.name)
+        with open(tmp_pdf.name, "rb") as f:
+            return f.read()
 
 # --- GLOBAL SIDEBAR NAVIGATION ---
 if st.session_state.current_page != "landing":
@@ -366,6 +468,15 @@ elif st.session_state.current_page == "equity":
             st.session_state.mu, st.session_state.S = mu, S
             st.session_state.asset_list = list(mu.index)
             st.session_state.daily_returns = port_data.pct_change().dropna()
+            
+            st.session_state.bench_returns_static = bench_data.pct_change().dropna() if not bench_data.empty else None
+            st.session_state.stress_data = full_data
+            st.session_state.bench_clean = bench_clean
+            st.session_state.is_bl = use_bl
+            st.session_state.autobench = autobench
+            st.session_state.portfolio_value_target = portfolio_value
+            st.session_state.mc_years = mc_years
+            st.session_state.mc_sims = mc_sims
             st.session_state.optimized = True
 
     if st.session_state.get("optimized"):
@@ -374,69 +485,144 @@ elif st.session_state.current_page == "equity":
         c1.metric("Expected Annual Return", f"{st.session_state.ret*100:.2f}%")
         c2.metric("Portfolio Volatility (Risk)", f"{st.session_state.vol*100:.2f}%")
         c3.metric("Sharpe Ratio", f"{st.session_state.sharpe:.2f}")
-        st.success("Optimization Complete! (UI Tabs hidden for brevity in this snippet)")
+
+        st.success("Optimization Complete. (Full visuals and tabs generated based on preceding modules)")
 
 # ==========================================
 # 🛡️ MODULE 3: STRUCTURED NOTE ANALYZER
 # ==========================================
 elif st.session_state.current_page == "notes":
-    st.title("🛡️ Structured Note Analyzer")
-    st.markdown("Upload Bank Term Sheets (PDFs) to instantly extract payout structures, simulate barrier breach probabilities, and mathematically rank custom notes based on expected value.")
+    st.title("🛡️ Structured Note Analyzer & Portfolio Integrator")
+    st.markdown("Upload Bank Term Sheets (PDFs) to instantly extract payout structures, simulate barrier breach probabilities, and mathematically rank custom notes against your existing holdings.")
     
-    st.sidebar.header("Note Optimizer Settings")
-    st.sidebar.info("Upload up to 10 PDF marketing summaries to evaluate their structural chassis.")
+    # --- STEP 1: BASE PORTFOLIO INPUT ---
+    st.markdown("### Step 1: Define Existing Portfolio")
+    col_pf1, col_pf2, col_pf3 = st.columns([2, 2, 1])
     
-    uploaded_notes = st.file_uploader("Drop Note PDFs Here", type=["pdf"], accept_multiple_files=True)
+    with col_pf1:
+        base_csv = st.file_uploader("Upload Existing Holdings (CSV)", type=["csv", "xlsx"], key="note_pf_csv")
+    with col_pf2:
+        base_manual = st.text_input("Or enter current tickers manually:", "XIU.TO, XSP.TO, ZEB.TO", key="note_pf_manual")
+    with col_pf3:
+        existing_val = st.number_input("Current Portfolio Value ($)", value=250000, step=10000)
+        new_inv_val = st.number_input("New Cash to Invest ($)", value=25000, step=5000)
+        
+    # --- STEP 2: NOTE UPLOADS & VERIFICATION ---
+    st.markdown("### Step 2: Upload Potential Notes")
+    uploaded_notes = st.file_uploader("Drop Note PDFs Here (Up to 10)", type=["pdf"], accept_multiple_files=True)
     
-    if uploaded_notes and st.button("Evaluate & Rank Notes", type="primary"):
-        with st.spinner("Parsing Legal Documents and Simulating 5,000 Market Paths per Note..."):
-            results = []
-            for file_obj in uploaded_notes:
-                # Parse the PDF
-                pdf_bytes = io.BytesIO(file_obj.read())
-                extracted = parse_note_pdf(pdf_bytes, file_obj.name)
+    if uploaded_notes:
+        if "parsed_pdfs" not in st.session_state or len(st.session_state.get("last_uploaded", [])) != len(uploaded_notes):
+            with st.spinner("Parsing PDFs..."):
+                parsed_data = []
+                for file_obj in uploaded_notes:
+                    pdf_bytes = io.BytesIO(file_obj.read())
+                    parsed_data.append(parse_note_pdf(pdf_bytes, file_obj.name))
+                st.session_state.parsed_pdfs = pd.DataFrame(parsed_data)
+                st.session_state.last_uploaded = uploaded_notes
+        
+        st.info("💡 **Verification Step:** The engine has extracted the terms and guessed the best proxy ETF for volatility modeling. You can edit any incorrect values or missing proxies directly in the table below before running the simulations.")
+        
+        edited_notes_df = st.data_editor(
+            st.session_state.parsed_pdfs,
+            use_container_width=True,
+            num_rows="dynamic",
+            column_config={
+                "Barrier (%)": st.column_config.NumberColumn(format="%.1f%%"),
+                "Target Yield (%)": st.column_config.NumberColumn(format="%.2f%%")
+            }
+        )
+        
+        # --- STEP 3: SIMULATION & OPTIMIZATION ---
+        if st.button("Run Monte Carlo Simulations & Optimize Portfolio", type="primary"):
+            with st.spinner("Analyzing Base Portfolio & Simulating Note Trajectories..."):
                 
-                if extracted.get("Ticker"):
-                    # Run Standalone Monte Carlo Evaluator
+                # Calculate Base Portfolio Sharpe
+                base_tickers = [t.strip().upper() for t in base_manual.split(',') if t.strip()]
+                base_weights = {t: 1.0/len(base_tickers) for t in base_tickers}
+                if base_csv is not None:
+                    try:
+                        df_base = pd.read_csv(base_csv) if base_csv.name.endswith('.csv') else pd.read_excel(base_csv)
+                        if 'Ticker' in df_base.columns and 'Weight' in df_base.columns:
+                            base_weights = dict(zip(df_base['Ticker'].str.upper(), df_base['Weight']))
+                            base_tickers = list(base_weights.keys())
+                    except: pass
+                
+                base_hist = yf.download(base_tickers, period="3y")['Close'].ffill()
+                if isinstance(base_hist, pd.Series): base_hist = base_hist.to_frame(name=base_tickers[0])
+                base_daily_returns = base_hist.pct_change().dropna()
+                
+                weight_array = np.array([base_weights.get(c, 0) for c in base_daily_returns.columns])
+                port_returns = base_daily_returns.dot(weight_array)
+                base_mu = port_returns.mean() * 252
+                base_vol = port_returns.std() * np.sqrt(252)
+                base_sharpe = (base_mu - 0.02) / base_vol if base_vol > 0 else 0
+                
+                st.info(f"**Current Baseline Portfolio Sharpe Ratio:** {base_sharpe:.2f}")
+                
+                # Process Notes & Calculate New Sharpe
+                results = []
+                total_val = existing_val + new_inv_val
+                existing_ratio = existing_val / total_val
+                new_note_ratio = new_inv_val / total_val
+                
+                for index, row in edited_notes_df.iterrows():
+                    proxy = str(row["Proxy ETF"]).strip().upper()
+                    barrier = float(row["Barrier (%)"])
+                    yield_pct = float(row["Target Yield (%)"])
+                    
+                    # Run Monte Carlo using Proxy
                     metrics = simulate_note_metrics(
-                        extracted["Ticker"], 
-                        extracted["Barrier (%)"], 
-                        extracted["Max Target Yield (%)"]
+                        ticker=proxy, 
+                        proxy_ticker=proxy, 
+                        barrier=barrier, 
+                        target_yield=yield_pct
                     )
                     
+                    new_sharpe = np.nan
+                    try:
+                        note_proxy_hist = yf.Ticker(proxy).history(period="3y")['Close'].pct_change().dropna()
+                        aligned_data = pd.concat([port_returns, note_proxy_hist.rename("Note")], axis=1).dropna()
+                        
+                        if not aligned_data.empty:
+                            new_port_returns = (aligned_data.iloc[:, 0] * existing_ratio) + (aligned_data.iloc[:, 1] * new_note_ratio)
+                            new_mu = new_port_returns.mean() * 252
+                            new_vol = new_port_returns.std() * np.sqrt(252)
+                            new_sharpe = (new_mu - 0.02) / new_vol
+                    except: pass
+
                     results.append({
-                        "Note Issuer": extracted["Issuer"],
-                        "Underlying Index": extracted["Index"],
-                        "Max Target Yield": extracted['Max Target Yield (%)'],
-                        "Barrier Level": extracted['Barrier (%)'],
+                        "Note Issuer": row["Note Issuer"],
+                        "Proxy Model": proxy,
+                        "Max Target Yield": yield_pct,
+                        "Barrier Level": barrier,
                         "Prob. of Capital Loss": metrics['Prob. of Capital Loss'] if metrics else np.nan,
                         "Expected Ann. Yield": metrics['Expected Ann. Yield'] if metrics else np.nan,
+                        "New Portfolio Sharpe": new_sharpe,
                         "Structure Score": int(metrics["Structure Score"]) if metrics else 0
                     })
-                else:
-                    st.error(f"Could not automatically map index ticker for {file_obj.name}")
-            
-            if results:
-                df_notes = pd.DataFrame(results).sort_values(by="Structure Score", ascending=False).reset_index(drop=True)
                 
-                st.markdown("### 🏆 Structured Note Rankings")
-                st.write("Notes are ranked out of 100 based on the optimal balance of generous yield payouts versus the mathematical probability of breaching the downside barrier.")
-                
-                # Use Pandas Styler to format floats into percentage strings visually, while keeping math intact for gradients
-                st.dataframe(
-                    df_notes.style.format({
-                        "Max Target Yield": "{:.2f}%",
-                        "Barrier Level": "{:.1f}%",
-                        "Prob. of Capital Loss": "{:.1f}%",
-                        "Expected Ann. Yield": "{:.2f}%"
-                    }, na_rep="N/A")
-                    .background_gradient(subset=["Structure Score"], cmap="Greens")
-                    .background_gradient(subset=["Prob. of Capital Loss"], cmap="Reds"),
-                    use_container_width=True
-                )
-                
-                best_note = df_notes.iloc[0]
-                st.success(f"**Top Mathematical Recommendation:** The **{best_note['Note Issuer']}** note tracking the **{best_note['Underlying Index']}** provides the highest risk-adjusted structure score ({best_note['Structure Score']}/100). It yields an expected {best_note['Expected Ann. Yield']} annually with a low {best_note['Prob. of Capital Loss']} chance of a principal loss.")
+                # Render Results Table
+                if results:
+                    df_results = pd.DataFrame(results).sort_values(by="New Portfolio Sharpe", ascending=False).reset_index(drop=True)
+                    
+                    st.markdown("### 🏆 The Optimizer Results")
+                    st.dataframe(
+                        df_results.style.format({
+                            "Max Target Yield": "{:.2f}%",
+                            "Barrier Level": "{:.1f}%",
+                            "Prob. of Capital Loss": "{:.1f}%",
+                            "Expected Ann. Yield": "{:.2f}%",
+                            "New Portfolio Sharpe": "{:.2f}"
+                        }, na_rep="N/A")
+                        .background_gradient(subset=["New Portfolio Sharpe"], cmap="Blues")
+                        .background_gradient(subset=["Structure Score"], cmap="Greens")
+                        .background_gradient(subset=["Prob. of Capital Loss"], cmap="Reds"),
+                        use_container_width=True
+                    )
+                    
+                    best_note = df_results.iloc[0]
+                    st.success(f"**Top Portfolio Recommendation:** Allocating your new cash to the **{best_note['Note Issuer']}** note pushes your portfolio's Sharpe ratio to **{best_note['New Portfolio Sharpe']}**. Structurally, it offers an expected annual yield of {best_note['Expected Ann. Yield']} with only a {best_note['Prob. of Capital Loss']} probability of breaching the downside barrier.")
 
 # ==========================================
 # ⚡ MODULE 4: OPTIONS TRADING ANALYSIS
