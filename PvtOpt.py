@@ -1,15 +1,11 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from pypfopt import EfficientFrontier, risk_models, expected_returns
-import datetime
 import requests
+import datetime
+from pypfopt import EfficientFrontier, risk_models, expected_returns
 
 # --- UI CONFIGURATION ---
 st.set_page_config(page_title="Private Portfolio Manager", layout="wide", page_icon="🏦")
-sns.set_theme(style="whitegrid")
 
 # --- SECURITY ---
 def check_password():
@@ -24,98 +20,88 @@ def check_password():
 
 if not check_password(): st.stop()
 
-# --- FMP V4 PREMIUM ENGINE ---
-# Auto-strip any hidden spaces from your Premium key
-fmp_api_key = str(st.secrets["fmp_api_key"]).strip()
+# --- SECRETS ---
+try: 
+    fmp_api_key = str(st.secrets["fmp_api_key"]).strip()
+except KeyError: 
+    st.sidebar.error("⚠️ FMP API Key missing from Secrets!"); fmp_api_key = None
 
-@st.cache_data(ttl=86400)
-def fetch_fmp_metadata(ticker, api_key):
-    """Uses Company Outlook (v4) for metadata."""
-    url = f"https://financialmodelingprep.com/api/v4/company-outlook?symbol={ticker}&apikey={api_key}"
-    try:
-        res = requests.get(url).json()
-        if isinstance(res, dict) and 'profile' in res: return res['profile']
-    except: pass
-    return {}
-
-@st.cache_data(ttl=86400)
-def get_fmp_v4_history(tickers, start_str, end_str, api_key):
-    """Strict v4 Historical Price Full implementation based on docs."""
-    hist_dict = {}
-    for t in tickers:
-        url = f"https://financialmodelingprep.com/api/v4/historical-price-full/{t}?from={start_str}&to={end_str}&apikey={api_key}"
-        try:
-            res = requests.get(url).json()
-            # v4 returns a direct list of data points 
-            if isinstance(res, list) and len(res) > 0:
-                df = pd.DataFrame(res)
-                if 'date' in df.columns and 'adjClose' in df.columns:
-                    df['date'] = pd.to_datetime(df['date'])
-                    df.set_index('date', inplace=True)
-                    hist_dict[t] = df['adjClose']
-        except: pass
-    return pd.DataFrame(hist_dict).sort_index() if hist_dict else pd.DataFrame()
 
 # --- SIDEBAR GUI ---
 st.sidebar.header("1. Setup")
-manual_tickers = st.sidebar.text_input("Tickers", "AAPL, MSFT, RY.TO")
+manual_tickers = st.sidebar.text_input("Tickers", "AAPL, RY.TO")
 time_range = st.sidebar.selectbox("Horizon", ("1 Year", "3 Years", "5 Years"), index=1)
-portfolio_value = st.sidebar.number_input("Portfolio Value ($)", value=100000)
 
-if st.sidebar.button("Run v4 Analysis", type="primary", use_container_width=True):
-    # Clean tickers and handle the .T to .TO translation [cite: 139]
-    tickers = [t.strip().upper().replace('.T', '.TO') for t in manual_tickers.replace(' ', ',').split(',') if t.strip()]
+st.sidebar.markdown("---")
+diagnostic_mode = st.sidebar.toggle("🛠️ Enable API Diagnostic Mode", value=False)
+test_ticker = st.sidebar.text_input("Diagnostic Test Ticker", "RY.TO")
+
+# ==========================================
+# 🛠️ DIAGNOSTIC CONSOLE
+# ==========================================
+if diagnostic_mode:
+    st.title("🛠️ Raw API Diagnostic Console")
+    st.write(f"Testing direct FMP endpoints for: **{test_ticker}**")
     
-    with st.spinner("Fetching v4 Institutional Data..."):
-        end_d = datetime.date.today()
-        start_d = end_d - datetime.timedelta(days=int(time_range.split()[0])*365)
-        
-        # Pull data using v4 architecture 
-        data = get_fmp_v4_history(tickers, start_d.strftime("%Y-%m-%d"), end_d.strftime("%Y-%m-%d"), fmp_api_key)
-        
-        if data.empty:
-            st.error("🚨 FMP API Error: No valid price data found. Verify your Premium Key in Secrets.")
-            st.stop()
-            
-        # Metadata Lookthrough
-        lookthrough = {}
-        for t in tickers:
-            prof = fetch_fmp_metadata(t, fmp_api_key)
-            lookthrough[t] = {prof.get('sector', 'Other'): 1.0}
+    if not fmp_api_key:
+        st.error("No API key found to test.")
+        st.stop()
 
-        # Portfolio Math [cite: 17, 18]
-        data = data.ffill().bfill()
-        mu = expected_returns.mean_historical_return(data)
-        S = risk_models.sample_cov(data)
-        ef = EfficientFrontier(mu, S)
-        weights = ef.max_sharpe()
-        
-        st.session_state.results = {
-            'weights': ef.clean_weights(),
-            'lookthrough': lookthrough,
-            'p_val': portfolio_value
+    if st.button("Run Diagnostics"):
+        endpoints = {
+            "V3 Profile (Legacy)": f"https://financialmodelingprep.com/api/v3/profile/{test_ticker}?apikey={fmp_api_key}",
+            "V4 Company Outlook (Premium)": f"https://financialmodelingprep.com/api/v4/company-outlook?symbol={test_ticker}&apikey={fmp_api_key}",
+            "V3 Historical Prices (Legacy)": f"https://financialmodelingprep.com/api/v3/historical-price-full/{test_ticker}?apikey={fmp_api_key}",
+            "V4 Historical Prices (Premium)": f"https://financialmodelingprep.com/api/v4/historical-price-full/{test_ticker}?apikey={fmp_api_key}",
+            "V3 ETF Holders": f"https://financialmodelingprep.com/api/v3/etf-holder/{test_ticker}?apikey={fmp_api_key}",
+            "V4 ETF Holders": f"https://financialmodelingprep.com/api/v4/etf-holder?symbol={test_ticker}&apikey={fmp_api_key}"
         }
-        st.session_state.optimized = True
 
-# --- DASHBOARD ---
-if st.session_state.get("optimized"):
-    res = st.session_state.results
-    t1, t2 = st.tabs(["Allocation", "Rebalancing"])
-    
-    with t1:
-        st.subheader("Asset Allocation by Sector")
-        sec_totals = {}
-        for t, w in res['weights'].items():
-            for s, sw in res['lookthrough'].get(t, {}).items():
-                sec_totals[s] = sec_totals.get(s, 0) + (w * sw)
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.pie(sec_totals.values(), labels=sec_totals.keys(), autopct='%1.1f%%', colors=sns.color_palette("pastel"))
-        st.pyplot(fig)
+        for name, url in endpoints.items():
+            st.markdown(f"### {name}")
+            safe_url = url.replace(fmp_api_key, "YOUR_API_KEY")
+            st.code(f"GET {safe_url}")
+            
+            try:
+                res = requests.get(url)
+                status = res.status_code
+                
+                if status == 200:
+                    st.success(f"Status: {status} OK")
+                elif status == 403:
+                    st.error(f"Status: {status} Forbidden (Permission Denied)")
+                elif status == 404:
+                    st.warning(f"Status: {status} Not Found (Ticker might not exist on this endpoint)")
+                else:
+                    st.error(f"Status: {status}")
+                
+                # Try to parse JSON to see the exact error or payload
+                try:
+                    data = res.json()
+                    with st.expander("View Raw JSON Response"):
+                        # If it's a massive list (like history), just show the first 3 items so we don't crash the browser
+                        if isinstance(data, list) and len(data) > 5:
+                            st.write(f"*List contains {len(data)} items. Showing first 3:*")
+                            st.json(data[:3])
+                        elif isinstance(data, dict) and 'historical' in data and len(data['historical']) > 5:
+                            st.write(f"*Historical list contains {len(data['historical'])} items. Showing first 3:*")
+                            preview = data.copy()
+                            preview['historical'] = preview['historical'][:3]
+                            st.json(preview)
+                        else:
+                            st.json(data)
+                except Exception as json_e:
+                    st.error(f"Could not parse JSON. Raw text: {res.text}")
+                    
+            except Exception as req_e:
+                st.error(f"Request failed entirely: {req_e}")
+            
+            st.markdown("---")
+            
+    st.stop() # Stops the rest of the app from running while in diagnostic mode
 
-    with t2:
-        st.subheader("Execution List")
-        df_rebal = pd.DataFrame([
-            {'Ticker': t, 'Weight': f"{w*100:.1f}%", 'Value': f"${w*res['p_val']:,.0f}"} 
-            for t, w in res['weights'].items()
-        ])
-        st.dataframe(df_rebal, use_container_width=True, hide_index=True)
+# ==========================================
+# 📈 NORMAL APP LOGIC
+# ==========================================
+if st.sidebar.button("Run Portfolio Analysis", type="primary", use_container_width=True):
+    st.info("The normal portfolio math is currently paused. Please flip on 'Diagnostic Mode' in the sidebar to test your API key.")
