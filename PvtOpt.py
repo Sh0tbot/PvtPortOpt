@@ -1,8 +1,6 @@
 import streamlit as st
 import pandas as pd
 import requests
-import datetime
-from pypfopt import EfficientFrontier, risk_models, expected_returns
 
 # --- UI CONFIGURATION ---
 st.set_page_config(page_title="Private Portfolio Manager", layout="wide", page_icon="🏦")
@@ -29,7 +27,6 @@ except KeyError:
 # --- SIDEBAR GUI ---
 st.sidebar.header("1. Setup")
 manual_tickers = st.sidebar.text_input("Tickers", "AAPL, RY.TO")
-time_range = st.sidebar.selectbox("Horizon", ("1 Year", "3 Years", "5 Years"), index=1)
 
 st.sidebar.markdown("---")
 diagnostic_mode = st.sidebar.toggle("🛠️ Enable API Diagnostic Mode", value=True)
@@ -60,6 +57,7 @@ if diagnostic_mode:
 
         for name, url in endpoints.items():
             st.markdown(f"### {name}")
+            # Hide it on the web interface for safety
             safe_url = url.replace(fmp_api_key, "[HIDDEN_API_KEY]")
             st.code(f"GET {safe_url}")
             
@@ -73,11 +71,11 @@ if diagnostic_mode:
                 elif status == 403: st.error(f"Status: {status} Forbidden")
                 else: st.warning(f"Status: {status}")
                 
-                # Append to our CSV Payload
+                # Append RAW URL (with exposed API key) to our CSV Payload
                 csv_data.append({
                     "Endpoint": name,
                     "Status Code": status,
-                    "Safe URL": safe_url,
+                    "Raw URL Used": url,
                     "Raw JSON Response": response_text
                 })
 
@@ -103,7 +101,7 @@ if diagnostic_mode:
                 csv_data.append({
                     "Endpoint": name,
                     "Status Code": "CRASH",
-                    "Safe URL": safe_url,
+                    "Raw URL Used": url,
                     "Raw JSON Response": str(req_e)
                 })
             
@@ -114,10 +112,11 @@ if diagnostic_mode:
         csv_str = df_diag.to_csv(index=False)
         
         st.success("✅ Diagnostic complete. Data compiled successfully.")
+        st.warning("⚠️ **Security Note:** The generated CSV below contains your LIVE API KEY in plain text. Do not share it publicly.")
         st.download_button(
-            label="📥 Download Diagnostic CSV",
+            label="📥 Download Diagnostic CSV (EXPOSED KEY)",
             data=csv_str,
-            file_name=f"FMP_Diagnostics_{test_ticker}.csv",
+            file_name=f"FMP_Diagnostics_{test_ticker}_UNMASKED.csv",
             mime="text/csv",
             type="primary"
         )
