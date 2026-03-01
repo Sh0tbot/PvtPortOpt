@@ -38,7 +38,7 @@ def fetch_stable_history_full(tickers, api_key):
     """Fetches maximum available history using the standard V3 API."""
     hist_dict = {}
     for t in tickers:
-        # Swapped to the standard v3 endpoint which is more permissive across API tiers
+        # Standard V3 Historical Data Endpoint
         url = f"https://financialmodelingprep.com/api/v3/historical-price-full/{t}?apikey={api_key}"
         try:
             res = requests.get(url)
@@ -52,7 +52,6 @@ def fetch_stable_history_full(tickers, api_key):
                         df.set_index('date', inplace=True)
                         hist_dict[t] = df['adjClose']
         except Exception as e: 
-            print(f"Error fetching {t}: {e}")
             pass
             
     return pd.DataFrame(hist_dict).sort_index() if hist_dict else pd.DataFrame()
