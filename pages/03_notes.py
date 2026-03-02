@@ -75,8 +75,20 @@ if uploaded_notes:
         use_container_width=True,
         num_rows="dynamic",
         column_config={
-            "Barrier (%)":      st.column_config.NumberColumn(format="%.1f%%"),
-            "Target Yield (%)": st.column_config.NumberColumn(format="%.2f%%"),
+            "Barrier (%)":            st.column_config.NumberColumn(format="%.1f%%"),
+            "Target Yield (%)":       st.column_config.NumberColumn(format="%.2f%%"),
+            "Note Type":              st.column_config.SelectboxColumn(
+                                          options=["autocallable", "autocallable_coupon",
+                                                   "accelerator", "booster",
+                                                   "principal_protected", "other"]),
+            "Share Class":            st.column_config.SelectboxColumn(options=["F", "A"]),
+            "Currency":               st.column_config.SelectboxColumn(options=["CAD", "USD"]),
+            "Term (Years)":           st.column_config.NumberColumn(min_value=1, max_value=15, step=1, format="%d"),
+            "Autocall Threshold (%)": st.column_config.NumberColumn(format="%.1f%%"),
+            "Autocall Frequency":     st.column_config.SelectboxColumn(
+                                          options=["annual", "semi-annual", "quarterly", "monthly"]),
+            "Participation Rate (%)": st.column_config.NumberColumn(format="%.1f%%"),
+            "Max Return (%)":         st.column_config.NumberColumn(format="%.1f%%"),
         }
     )
 
@@ -111,30 +123,43 @@ if uploaded_notes:
                 st.stop()
 
             base_daily_returns = base_hist.pct_change().dropna()
-            weight_array  = np.array([base_weights.get(c, 0) for c in base_daily_returns.columns])
-            port_returns  = base_daily_returns.dot(weight_array)
-            base_mu       = port_returns.mean() * TRADING_DAYS_PER_YEAR
-            base_vol      = port_returns.std()  * np.sqrt(TRADING_DAYS_PER_YEAR)
-            base_sharpe   = (base_mu - RISK_FREE_RATE) / base_vol if base_vol > 0 else 0
+            weight_array = np.array([base_weights.get(c, 0) for c in base_daily_returns.columns])
+            port_returns = base_daily_returns.dot(weight_array)
+            base_mu      = port_returns.mean() * TRADING_DAYS_PER_YEAR
+            base_vol     = port_returns.std()  * np.sqrt(TRADING_DAYS_PER_YEAR)
+            base_sharpe  = (base_mu - RISK_FREE_RATE) / base_vol if base_vol > 0 else 0
 
             st.info(f"**Current Baseline Portfolio Sharpe Ratio:** {base_sharpe:.2f}")
 
             # Simulate each note
-            results = []
+            results        = []
+            call_schedules = []
             total_val      = existing_val + new_inv_val
             existing_ratio = existing_val / total_val
             new_note_ratio = new_inv_val  / total_val
 
             for _, row in edited_notes_df.iterrows():
-                proxy     = str(row["Proxy ETF"]).strip().upper()
-                barrier   = float(row["Barrier (%)"])
-                yield_pct = float(row["Target Yield (%)"])
+                proxy      = str(row["Proxy ETF"]).strip().upper()
+                barrier    = float(row["Barrier (%)"])
+                yield_pct  = float(row["Target Yield (%)"])
+                note_type  = str(row.get("Note Type", "autocallable") or "autocallable").lower()
+                term_years = int(row.get("Term (Years)", 5) or 5)
+                ac_thresh  = float(row.get("Autocall Threshold (%)", 100.0) or 100.0)
+                ac_freq    = str(row.get("Autocall Frequency", "annual") or "annual")
+                part_rate  = float(row.get("Participation Rate (%)", 100.0) or 100.0)
+                max_ret_raw = row.get("Max Return (%)")
+                max_ret    = float(max_ret_raw) if pd.notna(max_ret_raw) else None
 
                 metrics = simulate_note_metrics(
-                    ticker=proxy,
                     proxy_ticker=proxy,
                     barrier=barrier,
                     target_yield=yield_pct,
+                    note_type=note_type,
+                    term_years=term_years,
+                    autocall_threshold_pct=ac_thresh,
+                    autocall_obs_freq=ac_freq,
+                    participation_rate=part_rate,
+                    max_return_pct=max_ret,
                 )
 
                 new_sharpe = np.nan
@@ -159,14 +184,27 @@ if uploaded_notes:
                     pass
 
                 results.append({
-                    "Note Issuer":          row["Note Issuer"],
-                    "Proxy Model":          proxy,
-                    "Max Target Yield":     yield_pct,
-                    "Barrier Level":        barrier,
-                    "Prob. of Capital Loss": metrics['Prob. of Capital Loss'] if metrics else np.nan,
-                    "Expected Ann. Yield":  metrics['Expected Ann. Yield']    if metrics else np.nan,
-                    "New Portfolio Sharpe": new_sharpe,
-                    "Structure Score":      int(metrics["Structure Score"])   if metrics else 0,
+                    "Note Issuer":             row["Note Issuer"],
+                    "Type":                    note_type,
+                    "Class":                   row.get("Share Class", "—"),
+                    "CCY":                     row.get("Currency", "—"),
+                    "Term":                    f"{term_years}yr",
+                    "Proxy":                   proxy,
+                    "Target Yield (%)":        yield_pct,
+                    "Barrier (%)":             barrier,
+                    "Prob. Capital Loss (%)":  metrics["Prob. of Capital Loss"] if metrics else np.nan,
+                    "Expected Ann. Yield (%)": metrics["Expected Ann. Yield"]   if metrics else np.nan,
+                    "Exp. Hold (yrs)":         metrics.get("expected_hold_years") if metrics else np.nan,
+                    "Prob. Called (%)":        metrics.get("prob_called")         if metrics else np.nan,
+                    "New Portfolio Sharpe":    new_sharpe,
+                    "Structure Score":         int(metrics["Structure Score"])    if metrics else 0,
+                })
+
+                call_schedules.append({
+                    "label":      f"{row['Note Issuer']} — {str(row.get('Underlying Index', ''))[:40]}",
+                    "note_type":  note_type,
+                    "schedule":   metrics.get("call_schedule") if metrics else None,
+                    "term_years": term_years,
                 })
 
             if results:
@@ -175,17 +213,44 @@ if uploaded_notes:
                     .sort_values(by="New Portfolio Sharpe", ascending=False)
                     .reset_index(drop=True)
                 )
-                st.markdown("### The Optimizer Results")
+                st.markdown("### Optimizer Results")
                 st.dataframe(
                     df_results.style.format({
-                        "Max Target Yield":      "{:.2f}%",
-                        "Barrier Level":         "{:.1f}%",
-                        "Prob. of Capital Loss": "{:.1f}%",
-                        "Expected Ann. Yield":   "{:.2f}%",
-                        "New Portfolio Sharpe":  "{:.2f}",
+                        "Target Yield (%)":        "{:.2f}%",
+                        "Barrier (%)":             "{:.1f}%",
+                        "Prob. Capital Loss (%)":  "{:.1f}%",
+                        "Expected Ann. Yield (%)": "{:.2f}%",
+                        "Exp. Hold (yrs)":         "{:.1f}",
+                        "Prob. Called (%)":        "{:.1f}%",
+                        "New Portfolio Sharpe":    "{:.2f}",
                     }, na_rep="N/A")
-                    .background_gradient(subset=["New Portfolio Sharpe"], cmap="Blues")
-                    .background_gradient(subset=["Structure Score"],       cmap="Greens")
-                    .background_gradient(subset=["Prob. of Capital Loss"], cmap="Reds"),
+                    .background_gradient(subset=["New Portfolio Sharpe"],   cmap="Blues")
+                    .background_gradient(subset=["Structure Score"],         cmap="Greens")
+                    .background_gradient(subset=["Prob. Capital Loss (%)"],  cmap="Reds"),
                     use_container_width=True,
                 )
+
+                # ── Autocall Call Schedule Expanders ─────────────────────────
+                autocall_notes = [cs for cs in call_schedules if cs["schedule"]]
+                if autocall_notes:
+                    st.markdown("### Autocall Call Schedule")
+                    for cs in autocall_notes:
+                        with st.expander(f"📅 {cs['label']}"):
+                            sched_rows = sorted(cs["schedule"].items())
+                            df_sched = pd.DataFrame(
+                                sched_rows,
+                                columns=["Observation Year", "P(Called at this date) (%)"]
+                            )
+                            df_sched["P(Called by this date) (%)"] = (
+                                df_sched["P(Called at this date) (%)"].cumsum()
+                            )
+                            st.bar_chart(
+                                df_sched.set_index("Observation Year")["P(Called at this date) (%)"]
+                            )
+                            st.dataframe(
+                                df_sched.style.format({
+                                    "P(Called at this date) (%)": "{:.1f}%",
+                                    "P(Called by this date) (%)": "{:.1f}%",
+                                }),
+                                use_container_width=True,
+                            )
