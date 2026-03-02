@@ -54,7 +54,7 @@ def parse_note_pdf(file_bytes: io.BytesIO, filename: str, gemini_api_key: str) -
         pdf_data = file_bytes.getvalue()
 
         genai.configure(api_key=gemini_api_key)
-        model = genai.GenerativeModel("gemini-2.0-flash")
+        model = genai.GenerativeModel("gemini-2.5-flash")
 
         response = model.generate_content(
             contents=[
