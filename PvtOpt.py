@@ -60,6 +60,13 @@ except KeyError:
     st.sidebar.error("FMP API Key missing from Secrets!")
     st.session_state["fmp_api_key"] = None
 
+# ── Gemini API Key ────────────────────────────────────────────────────────────
+try:
+    st.session_state["gemini_api_key"] = str(st.secrets["gemini_api_key"]).strip()
+except KeyError:
+    st.sidebar.warning("Gemini API Key missing — structured note parsing unavailable.")
+    st.session_state["gemini_api_key"] = None
+
 # ── Navigation ────────────────────────────────────────────────────────────────
 landing = st.Page("pages/01_landing.py", title="Home",              icon="🏠", default=True)
 equity  = st.Page("pages/02_equity.py",  title="Equity Optimizer",  icon="📈")

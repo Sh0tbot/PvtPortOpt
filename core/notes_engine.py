@@ -2,99 +2,75 @@
 # PDF parsing and Monte Carlo simulation for the Structured Note Analyzer module.
 
 import io
-import re
+import json
 import numpy as np
 import streamlit as st
 import yfinance as yf
 
 from core.config import BANK_COUPON_FALLBACKS, RISK_FREE_RATE, TRADING_DAYS_PER_YEAR
 
+_PROXY_MAP = {
+    "canadian_banks":     "ZEB.TO",
+    "canadian_telecom":   "XTC.TO",
+    "us_equity_hedged":   "ZUE.TO",
+    "us_equity":          "ZSP.TO",
+    "canadian_utilities": "ZUT.TO",
+    "canadian_energy":    "XEG.TO",
+    "canadian_reit":      "ZRE.TO",
+    "canadian_tech":      "XIT.TO",
+    "canadian_broad":     "XIU.TO",
+}
 
-def parse_note_pdf(file_bytes: io.BytesIO, filename: str) -> dict:
+_GEMINI_PROMPT = """You are a financial document analyst. Extract the following fields from this structured note term sheet PDF and return valid JSON only — no markdown, no explanation.
+
+Fields to extract:
+- "issuer": the issuing bank — must be exactly one of: RBC, TD, BMO, Scotiabank, CIBC, NBC, Unknown
+- "underlying_index": the full name of the underlying index (e.g. "Solactive Equal Weight Canadian Banks AR Index")
+- "barrier_pct": the capital protection barrier as a float percentage. If the document says "75% Barrier Level" return 75.0; if it says "100% Principal Protection" return 100.0
+- "target_yield_pct": the annual coupon or fixed return as a float percentage. Look for labels like "Fixed Return", "Coupon", "Yield", "per annum". Return the number only (e.g. 8.95 for 8.95%)
+- "index_type": classify the underlying index into exactly one of: canadian_banks, canadian_telecom, us_equity_hedged, us_equity, canadian_utilities, canadian_energy, canadian_reit, canadian_tech, canadian_broad
+
+If a value cannot be determined with confidence, use null."""
+
+
+def parse_note_pdf(file_bytes: io.BytesIO, filename: str, gemini_api_key: str) -> dict:
     """
-    Extracts structured note terms from a PDF term sheet.
-    Uses regex and keyword heuristics to identify issuer, index, barrier, and yield.
+    Extracts structured note terms from a PDF term sheet using Google Gemini.
+    Sends the full PDF to gemini-2.0-flash and parses a structured JSON response.
     Returns a dict with the extracted fields.
     """
-    import pdfplumber
+    import google.generativeai as genai
+
+    if not gemini_api_key:
+        return {
+            "Note Issuer": "Error",
+            "Underlying Index": "Gemini API key not configured.",
+            "Proxy ETF": "XIU.TO",
+            "Barrier (%)": 75.0,
+            "Target Yield (%)": 8.0,
+        }
 
     try:
-        with pdfplumber.open(file_bytes) as pdf:
-            text = ""
-            for page in pdf.pages[:3]:
-                text += page.extract_text() + "\n"
+        pdf_data = file_bytes.getvalue()
 
-        # ── Issuer detection ──────────────────────────────────────────────────
-        issuer = "Unknown"
-        if "Royal Bank" in text or "RBC" in text:
-            issuer = "RBC"
-        elif "Bank of Nova Scotia" in text or "Scotiabank" in text:
-            issuer = "Scotiabank"
-        elif "Canadian Imperial" in text or "CIBC" in text:
-            issuer = "CIBC"
-        elif "Toronto-Dominion" in text or "TD" in text:
-            issuer = "TD"
-        elif "Bank of Montreal" in text or "BMO" in text:
-            issuer = "BMO"
-        elif "National Bank" in text or "NBC" in text:
-            issuer = "NBC"
+        genai.configure(api_key=gemini_api_key)
+        model = genai.GenerativeModel("gemini-2.0-flash")
 
-        # ── Index name extraction ─────────────────────────────────────────────
-        index_name = "Unknown Index"
-        index_match = re.search(r'(Solactive[\w\s]+(?:Index|AR|TR|GTR))', text, re.IGNORECASE)
-        if index_match:
-            index_name = index_match.group(1).strip().replace('\n', ' ')
-
-        # ── Proxy ETF mapping via keyword heuristics ──────────────────────────
-        proxy = "XIU.TO"
-        idx_lower = index_name.lower()
-
-        if "bank" in idx_lower:
-            proxy = "ZEB.TO"
-        elif "telecom" in idx_lower:
-            proxy = "XTC.TO"
-        elif "us " in idx_lower or "u.s." in idx_lower or "sp500" in idx_lower or "s&p" in idx_lower:
-            proxy = "ZUE.TO" if "hedged" in idx_lower else "ZSP.TO"
-        elif "utility" in idx_lower or "utilities" in idx_lower:
-            proxy = "ZUT.TO"
-        elif "energy" in idx_lower or "pipeline" in idx_lower:
-            proxy = "XEG.TO"
-        elif "real estate" in idx_lower or "reit" in idx_lower:
-            proxy = "ZRE.TO"
-        elif "tech" in idx_lower:
-            proxy = "XIT.TO"
-
-        # ── Barrier level extraction ───────────────────────────────────────────
-        barrier = 100.0
-        barrier_match = re.search(
-            r'(?:Barrier Level|Barrier|Protection Barrier|Contingent Protection).*?(\d{2,3}(?:\.\d{1,2})?)%',
-            text, re.IGNORECASE
+        response = model.generate_content(
+            contents=[
+                {"mime_type": "application/pdf", "data": pdf_data},
+                _GEMINI_PROMPT,
+            ],
+            generation_config={"response_mime_type": "application/json"},
         )
-        if barrier_match:
-            barrier = float(barrier_match.group(1))
-        else:
-            drawdown_match = re.search(
-                r'(?:Barrier|greater than or equal to).*?(-\d{2}(?:\.\d{1,2})?)%',
-                text, re.IGNORECASE
-            )
-            if drawdown_match:
-                barrier = 100.0 + float(drawdown_match.group(1))
 
-        if issuer == "RBC" and "100% Principal Protection" in text:
-            barrier = 100.0
-        if barrier <= 50.0:
-            barrier = 100.0 - barrier
+        result = json.loads(response.text)
 
-        # ── Coupon/yield extraction ────────────────────────────────────────────
-        coupon = 0.0
-        yield_match = re.search(
-            r'(?:Fixed Return|Coupon|Yield|per annum).*?(\d{1,2}\.\d{1,2})%',
-            text, re.IGNORECASE
-        )
-        if yield_match:
-            coupon = float(yield_match.group(1))
-        else:
-            coupon = BANK_COUPON_FALLBACKS.get(issuer, 0.0)
+        issuer     = result.get("issuer") or "Unknown"
+        index_name = result.get("underlying_index") or "Unknown Index"
+        barrier    = float(result.get("barrier_pct") or 100.0)
+        coupon     = float(result.get("target_yield_pct") or BANK_COUPON_FALLBACKS.get(issuer, 0.0))
+        proxy      = _PROXY_MAP.get(result.get("index_type") or "", "XIU.TO")
 
         return {
             "Note Issuer": issuer,

@@ -40,6 +40,10 @@ with col_pf3:
     new_inv_val  = st.number_input("New Cash to Invest ($)",      value=DEFAULT_NEW_CASH_VALUE,      step=5000)
 
 # ── STEP 2: Note Uploads & Verification ──────────────────────────────────────
+if not st.session_state.get("gemini_api_key"):
+    st.warning("Gemini API key not configured. Add `gemini_api_key` to `.streamlit/secrets.toml` to enable PDF parsing.")
+    st.stop()
+
 st.markdown("### Step 2: Upload Potential Notes")
 uploaded_notes = st.file_uploader(
     "Drop Note PDFs Here (Up to 10)",
@@ -56,7 +60,7 @@ if uploaded_notes:
             parsed_data = []
             for file_obj in uploaded_notes:
                 pdf_bytes = io.BytesIO(file_obj.read())
-                parsed_data.append(parse_note_pdf(pdf_bytes, file_obj.name))
+                parsed_data.append(parse_note_pdf(pdf_bytes, file_obj.name, st.session_state["gemini_api_key"]))
             st.session_state.parsed_pdfs = pd.DataFrame(parsed_data)
             st.session_state.last_uploaded = uploaded_notes
 

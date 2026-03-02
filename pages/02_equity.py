@@ -15,7 +15,7 @@ from core.config import (
 )
 from core.data import (
     fetch_stable_metadata, fetch_stable_history_full,
-    _is_fundserv_code,
+    _is_fundserv_code, resolve_fundserv_to_morningstar,
 )
 from core.optimization import run_optimization, compute_portfolio_metrics
 from core.analytics import run_stress_tests, run_monte_carlo, compute_drawdown
@@ -121,15 +121,23 @@ _fundserv_codes = [t for t in _preview_tickers if _is_fundserv_code(t)]
 _fundserv_map: dict[str, str] = {}
 if _fundserv_codes:
     st.sidebar.header("6. FundServ Mappings")
-    st.sidebar.caption("Enter the Yahoo Finance ID for each FundServ code (e.g. 0P00009AJJ.TO).")
     for _code in _fundserv_codes:
-        _mapped = st.sidebar.text_input(
-            f"{_code} →",
-            key=f"fsmap_{_code}",
-            placeholder="e.g. 0P00009AJJ.TO",
-        )
-        if _mapped.strip():
-            _fundserv_map[_code] = _mapped.strip().upper()
+        _auto = resolve_fundserv_to_morningstar(_code)
+        if _auto:
+            st.sidebar.success(f"**{_code}** → `{_auto}` (auto-resolved)")
+            _fundserv_map[_code] = _auto
+        else:
+            st.sidebar.caption(
+                f"Could not auto-resolve **{_code}**. "
+                "Find the Yahoo Finance ID at finance.yahoo.com and enter it below."
+            )
+            _mapped = st.sidebar.text_input(
+                f"{_code} →",
+                key=f"fsmap_{_code}",
+                placeholder="e.g. 0P00009AJJ.TO",
+            )
+            if _mapped.strip():
+                _fundserv_map[_code] = _mapped.strip().upper()
 
 optimize_button = st.sidebar.button("Run Full Analysis", type="primary", use_container_width=True)
 
