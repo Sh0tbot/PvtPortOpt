@@ -139,16 +139,27 @@ if uploaded_notes:
             new_note_ratio = new_inv_val  / total_val
 
             for _, row in edited_notes_df.iterrows():
-                proxy      = str(row["Proxy ETF"]).strip().upper()
-                barrier    = float(row["Barrier (%)"])
-                yield_pct  = float(row["Target Yield (%)"])
-                note_type  = str(row.get("Note Type", "autocallable") or "autocallable").lower()
-                term_years = int(row.get("Term (Years)", 5) or 5)
-                ac_thresh  = float(row.get("Autocall Threshold (%)", 100.0) or 100.0)
-                ac_freq    = str(row.get("Autocall Frequency", "annual") or "annual")
-                part_rate  = float(row.get("Participation Rate (%)", 100.0) or 100.0)
-                max_ret_raw = row.get("Max Return (%)")
-                max_ret    = float(max_ret_raw) if pd.notna(max_ret_raw) else None
+                proxy     = str(row["Proxy ETF"]).strip().upper()
+                barrier   = float(row["Barrier (%)"])
+                yield_pct = float(row["Target Yield (%)"])
+
+                _nt = row.get("Note Type", "autocallable")
+                note_type  = str(_nt).lower() if pd.notna(_nt) else "autocallable"
+
+                _ty = row.get("Term (Years)", 5)
+                term_years = int(_ty) if pd.notna(_ty) else 5
+
+                _at = row.get("Autocall Threshold (%)", 100.0)
+                ac_thresh  = float(_at) if pd.notna(_at) else 100.0
+
+                _af = row.get("Autocall Frequency", "annual")
+                ac_freq    = str(_af) if pd.notna(_af) else "annual"
+
+                _pr = row.get("Participation Rate (%)", 100.0)
+                part_rate  = float(_pr) if pd.notna(_pr) else 100.0
+
+                _mr = row.get("Max Return (%)")
+                max_ret    = float(_mr) if pd.notna(_mr) else None
 
                 metrics = simulate_note_metrics(
                     proxy_ticker=proxy,
