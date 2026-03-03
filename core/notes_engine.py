@@ -19,32 +19,36 @@ _PROXY_MAP = {
     "canadian_reit":      "ZRE.TO",
     "canadian_tech":      "XIT.TO",
     "canadian_broad":     "XIU.TO",
+    "global_equity":      "ZEA.TO",
 }
 
-_GEMINI_PROMPT = """You are a financial document analyst. Extract the following fields from this structured note term sheet PDF and return valid JSON only — no markdown, no explanation.
+_GEMINI_PROMPT = """You are an expert financial analyst for structured products. Your goal is to extract precise technical details from a bank's Term Sheet PDF into a strict JSON format.
 
-Fields to extract:
-- "issuer": the issuing bank — must be exactly one of: RBC, TD, BMO, Scotiabank, CIBC, NBC, Unknown
-- "underlying_index": the full name of the underlying index (e.g. "Solactive Equal Weight Canadian Banks AR Index")
-- "barrier_pct": the capital protection barrier as a float percentage. If the document says "75% Barrier Level" return 75.0; if it says "100% Principal Protection" return 100.0
-- "target_yield_pct": the annual coupon or fixed return as a float percentage. Look for labels like "Fixed Return", "Coupon", "Yield", "per annum". Return the number only (e.g. 8.95 for 8.95%)
-- "index_type": classify the underlying index into exactly one of: canadian_banks, canadian_telecom, us_equity_hedged, us_equity, canadian_utilities, canadian_energy, canadian_reit, canadian_tech, canadian_broad
-- "share_class": "F" or "A" — F class has no embedded trailer fee; A class has ~1% trailer embedded. Look for "Series F", "Class F", "Series A", "Class A", or advisor fee language
-- "currency": "CAD" or "USD" — the denomination of the note
-- "note_type": classify the note structure as exactly one of:
-    autocallable — called early if underlying hits autocall threshold on observation date; fixed return paid only if called
-    autocallable_coupon — like autocallable but also pays periodic coupons regardless of whether called
-    accelerator — participates in index upside at enhanced rate (participation_rate > 100%), with downside barrier
-    booster — similar to accelerator; enhanced upside participation, downside barrier
-    principal_protected — 100% of capital returned at maturity regardless of underlying performance
-    other — any structure that does not fit the above
-- "term_years": integer term of the note in years (e.g. 3, 5, 7)
-- "autocall_threshold_pct": for autocallable/autocallable_coupon only — the index level at which the note is called, as a percentage of initial level (e.g. 100.0 means at or above initial). null for non-autocallable types.
-- "autocall_obs_freq": observation frequency for autocall checks — one of: annual, semi-annual, quarterly, monthly. null for non-autocallable.
-- "participation_rate": for accelerator/booster only — upside participation multiplier as a float percentage (e.g. 150.0 means 1.5x the index gain). null for other types.
-- "max_return_pct": cap on total return over the full term if applicable (e.g. 40.0 means max 40% total gain). null if uncapped.
+CRITICAL INSTRUCTIONS:
+1.  **JSON ONLY**: Return ONLY valid JSON. No markdown formatting, no code blocks, no introductory text.
+2.  **Null Handling**: If a field is not explicitly stated or cannot be inferred with high confidence, use null.
+3.  **Percentages**: Convert all percentages to floats (e.g., "15%" -> 15.0).
+4.  **Underlying**: If multiple assets (e.g., "Worst of Bank A and Bank B"), list them or identify the basket.
 
-If a value cannot be determined with confidence, use null."""
+EXTRACT THESE FIELDS:
+- "issuer": Bank name (RBC, TD, BMO, Scotiabank, CIBC, NBC, Desjardins, or Unknown).
+- "underlying_index": Name of the reference asset(s). If "Worst-of", indicate that.
+- "index_type": Best fit category: [canadian_banks, canadian_telecom, us_equity_hedged, us_equity, canadian_utilities, canadian_energy, canadian_reit, canadian_tech, canadian_broad, global_equity].
+- "barrier_pct": The price level (as % of initial) where capital protection disappears. (e.g., if "30% buffer", barrier is 70.0; if "75% Barrier", barrier is 75.0).
+- "target_yield_pct": The annualized coupon or fixed return rate. (e.g., "Coupon 9.00% p.a." -> 9.0).
+- "note_type": One of [autocallable, autocallable_coupon, accelerator, booster, principal_protected].
+    - "autocallable": Pays return ONLY if called early or at maturity if above barrier (Kick-out).
+    - "autocallable_coupon": Pays regular coupons (monthly/qtr/semi) contingent on barrier, plus principal at end (Contingent Income).
+    - "accelerator": Participation > 100% upside, no coupons.
+    - "booster": Enhanced upside up to a cap, no coupons.
+- "term_years": Investment term in years (e.g., 2, 5, 7).
+- "autocall_threshold_pct": The initial index level required to trigger an autocall (usually 100.0, sometimes 105.0).
+- "autocall_obs_freq": Frequency of autocall observations [monthly, quarterly, semi-annual, annual].
+- "participation_rate": Upside participation % (e.g., 100.0, 150.0). Null if not applicable.
+- "max_return_pct": Maximum total return cap over the life of the note. Null if uncapped.
+- "share_class": "F" (Fee-based) or "A" (Commission-based). Default to "F" if unsure.
+- "currency": "CAD" or "USD".
+"""
 
 
 def parse_note_pdf(file_bytes: io.BytesIO, filename: str, gemini_api_key: str) -> dict:
@@ -141,6 +145,7 @@ def simulate_note_metrics(
     autocall_obs_freq: str = "annual",
     participation_rate: float = 100.0,
     max_return_pct: float | None = None,
+    vol_adj: float = 0.0,
 ) -> dict | None:
     """
     Runs a GBM Monte Carlo simulation (5000 paths) to estimate risk/return metrics.
@@ -158,15 +163,72 @@ def simulate_note_metrics(
         daily_returns = hist.pct_change().dropna()
         mu  = daily_returns.mean() * TRADING_DAYS_PER_YEAR
         vol = daily_returns.std()  * np.sqrt(TRADING_DAYS_PER_YEAR)
+        vol += vol_adj  # Apply sensitivity shock (e.g. +0.05)
+
+        # Heston Stochastic Volatility Parameters
+        kappa   = 3.0        # Mean reversion speed of variance
+        theta   = vol**2     # Long-term mean variance
+        sigma_v = 0.3        # Volatility of volatility (vol-of-vol)
+        rho     = -0.7       # Correlation between price and vol (leverage effect)
+        v0      = vol**2     # Initial variance
 
         sims = 5000
         days = int(term_years * TRADING_DAYS_PER_YEAR)
         dt   = 1 / TRADING_DAYS_PER_YEAR
 
-        Z      = np.random.standard_normal((sims, days))
-        paths  = np.exp((mu - 0.5 * vol ** 2) * dt + vol * np.sqrt(dt) * Z)
-        prices = np.cumprod(paths, axis=1) * 100  # index starts at 100
+        # Cholesky decomposition for correlated shocks
+        # L = [[1, 0], [rho, sqrt(1-rho^2)]]
+        L = np.array([[1.0, 0.0], [rho, np.sqrt(1 - rho**2)]])
+
+        # Initialize price and variance arrays
+        price_paths = np.zeros((sims, days + 1))
+        price_paths[:, 0] = 100.0
+        v = np.full(sims, v0)
+
+        for t in range(days):
+            # Generate correlated random normals
+            Z = np.random.standard_normal((sims, 2)) @ L.T
+            W_s, W_v = Z[:, 0], Z[:, 1]
+
+            # Update price (Euler-Maruyama on log-price)
+            price_paths[:, t+1] = price_paths[:, t] * np.exp((mu - 0.5 * v) * dt + np.sqrt(v * dt) * W_s)
+            # Update variance (CIR process)
+            v = v + kappa * (theta - v) * dt + sigma_v * np.sqrt(v * dt) * W_v
+            v = np.maximum(v, 1e-6) # Ensure variance stays positive
+
+        prices = price_paths[:, 1:]
         final  = prices[:, -1]
+
+        def _calculate_worst_case(price_array: np.ndarray, term: int) -> float:
+            """Helper to calculate annualized loss on the bottom 5% of paths (CVaR)."""
+            if len(price_array) == 0:
+                return 0.0
+            loss_threshold = np.percentile(price_array, 5)
+            worst_paths = price_array[price_array < loss_threshold]
+            # If no paths are strictly less, include paths equal to the percentile
+            if len(worst_paths) == 0:
+                worst_paths = price_array[price_array <= loss_threshold]
+            avg_final = np.mean(worst_paths) if len(worst_paths) > 0 else loss_threshold
+            # Convert final price to an annualized loss percentage
+            return ((max(avg_final / 100, 1e-10) ** (1 / term)) - 1) * 100
+
+        def _calculate_score(yield_pct, p_loss, worst_case_loss, p_success):
+            """
+            Calculates a weighted efficiency score (0-100) for the note.
+            """
+            # 1. Yield Score: Reward high potential returns (capped at 40pts for ~16% yield)
+            yield_score = min(40, yield_pct * 2.5)
+            
+            # 2. Safety Score: Reward low probability of capital loss (max 40pts)
+            safety_score = (1 - p_loss) * 40
+            
+            # 3. Tail Risk Penalty: Penalize deep worst-case losses (e.g. -20% loss -> -10pts)
+            tail_penalty = abs(worst_case_loss) * 0.5
+            
+            # 4. Efficiency Bonus: Reward high probability of positive outcome (max 20pts)
+            efficiency_bonus = p_success * 20
+            
+            return max(1, min(99, yield_score + safety_score + efficiency_bonus - tail_penalty))
 
         # ── Autocallable / Autocallable with coupon ───────────────────────────
         if note_type in ("autocallable", "autocallable_coupon"):
@@ -186,6 +248,9 @@ def simulate_note_metrics(
                 active &= ~hit
 
             is_called     = ~np.isnan(called_at_year)
+            # Worst case for autocallables is calculated only on paths that survive to maturity
+            worst_case_ann_loss = _calculate_worst_case(final[~is_called], term_years)
+
             survived      = ~is_called
             breach        = survived & (final < barrier)
             above_barrier = survived & (final >= barrier)
@@ -202,11 +267,12 @@ def simulate_note_metrics(
                 + ann_loss   * p_breach
             )
             exp_hold = float(np.where(is_called, called_at_year, term_years).mean())
-            score    = min(100, max(0, (target_yield / max(vol * 100, 1e-5)) * p_called * 100 * 1.5))
+            score    = _calculate_score(target_yield, p_breach, worst_case_ann_loss, p_called)
 
             return {
                 "Prob. of Capital Loss": p_breach * 100,
                 "Expected Ann. Yield":   exp_yield,
+                "Worst Case Ann. Loss":  worst_case_ann_loss,
                 "Structure Score":       score,
                 "call_schedule":         call_schedule,
                 "expected_hold_years":   exp_hold,
@@ -217,6 +283,8 @@ def simulate_note_metrics(
         if note_type in ("accelerator", "booster"):
             gain_mask = final >= 100
             loss_mask = final < barrier
+
+            worst_case_ann_loss = _calculate_worst_case(final, term_years)
 
             raw_total_gains = (final[gain_mask] / 100 - 1) * (participation_rate / 100) * 100
             if max_return_pct is not None:
@@ -233,11 +301,12 @@ def simulate_note_metrics(
                 (float(np.mean(ann_gains)) if gain_mask.sum() > 0 else 0.0) * p_gain
                 + ann_loss * p_loss
             )
-            score = min(100, max(0, (exp_yield / max(vol * 100, 1e-5)) * p_gain * 100 * 1.5))
+            score = _calculate_score(exp_yield, p_loss, worst_case_ann_loss, p_gain)
 
             return {
                 "Prob. of Capital Loss": p_loss * 100,
                 "Expected Ann. Yield":   exp_yield,
+                "Worst Case Ann. Loss":  worst_case_ann_loss,
                 "Structure Score":       score,
                 "call_schedule":         None,
                 "expected_hold_years":   float(term_years),
@@ -248,14 +317,16 @@ def simulate_note_metrics(
         breach_mask = final < barrier
         prob_breach = breach_mask.sum() / sims * 100
         avg_loss    = np.mean(final[breach_mask]) / 100 if breach_mask.sum() > 0 else 1.0
+        worst_case_ann_loss = _calculate_worst_case(final, term_years)
         ann_loss    = ((max(avg_loss, 1e-10) ** (1 / term_years)) - 1) * 100
         prob_succ   = 1 - prob_breach / 100
         exp_yield   = target_yield * prob_succ + ann_loss * (prob_breach / 100)
-        score       = min(100, max(0, (target_yield / max(vol * 100, 1e-5)) * prob_succ * 100 * 1.5))
+        score       = _calculate_score(target_yield, prob_breach / 100, worst_case_ann_loss, prob_succ)
 
         return {
             "Prob. of Capital Loss": prob_breach,
             "Expected Ann. Yield":   exp_yield,
+            "Worst Case Ann. Loss":  worst_case_ann_loss,
             "Structure Score":       score,
             "call_schedule":         None,
             "expected_hold_years":   float(term_years),

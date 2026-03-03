@@ -87,26 +87,26 @@ def fetch_stable_metadata(ticker: str, api_key: str) -> tuple:
                 is_fund = prof.get('isEtf', False) or prof.get('isFund', False)
                 name = prof.get('companyName', '').upper()
 
-                asset_class = 'Other'
-                is_fixed = any(w in name for w in ['BOND', 'FIXED INCOME', 'TREASURY', 'YIELD'])
-                is_cash = any(w in name for w in ['MONEY', 'CASH'])
-
+                # Suggestion: Move classification logic to a helper or mapping
                 if is_fund:
-                    if is_fixed:
+                    if any(w in name for w in ['BOND', 'FIXED INCOME', 'TREASURY', 'YIELD']):
                         asset_class, sector = 'Fixed Income', 'Bonds'
-                    elif is_cash:
+                    elif any(w in name for w in ['MONEY', 'CASH']):
                         asset_class = 'Cash & Equivalents'
                     elif country == 'CA' or ticker.endswith('.TO'):
                         asset_class = 'Canadian Equities'
                     else:
                         asset_class = 'US Equities'
                 else:
-                    if country == 'CA' or ticker.endswith('.TO'):
+                    mapping = {'CA': 'Canadian Equities', 'US': 'US Equities'}
+                    if country in mapping:
+                        asset_class = mapping[country]
+                    elif ticker.endswith('.TO'):
                         asset_class = 'Canadian Equities'
-                    elif country == 'US':
-                        asset_class = 'US Equities'
                     elif country != 'Unknown':
                         asset_class = 'International Equities'
+                    else:
+                        asset_class = 'Other'
 
                 div_rate = prof.get('lastDiv', prof.get('lastDividend', 0.0))
                 price = prof.get('price', 1.0)

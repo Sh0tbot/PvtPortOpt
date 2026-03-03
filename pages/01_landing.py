@@ -7,7 +7,7 @@ st.title("Enterprise Advisor Suite")
 st.markdown("Select an analytical module below to begin.")
 st.markdown("---")
 
-c1, c2, c3 = st.columns(3)
+c1, c2, c3, c4 = st.columns(4)
 
 with c1:
     st.markdown("### Equity & Fund Optimizer")
@@ -32,3 +32,11 @@ with c3:
         "expected payouts on multi-leg positions."
     )
     st.page_link("pages/04_options.py", label="Launch Options Analyzer", icon="⚡")
+
+with c4:
+    st.markdown("### Value Screener")
+    st.write(
+        "Automated S&P 500 & TSX scanner filtering for deep value (DCF), strong financials "
+        "(Piotroski > 8), and positive insider sentiment."
+    )
+    st.page_link("pages/05_value.py", label="Launch Value Screener", icon="💎")

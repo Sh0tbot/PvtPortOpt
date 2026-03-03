@@ -72,6 +72,7 @@ landing = st.Page("pages/01_landing.py", title="Home",              icon="🏠",
 equity  = st.Page("pages/02_equity.py",  title="Equity Optimizer",  icon="📈")
 notes   = st.Page("pages/03_notes.py",   title="Structured Notes",  icon="🛡️")
 options = st.Page("pages/04_options.py", title="Options Analysis",  icon="⚡")
+value   = st.Page("pages/05_value.py",   title="Value Screener",    icon="💎")
 
-pg = st.navigation([landing, equity, notes, options])
+pg = st.navigation([landing, equity, notes, options, value])
 pg.run()

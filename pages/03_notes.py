@@ -93,7 +93,25 @@ if uploaded_notes:
     )
 
     # ── STEP 3: Simulation & Optimization ────────────────────────────────────
-    if st.button("Run Monte Carlo Simulations & Optimize Portfolio", type="primary"):
+    col_run, col_info = st.columns([4, 1])
+    with col_info:
+        with st.popover("ℹ️ Simulation Models"):
+            st.markdown("""
+            **Simulation Methodology Overview**
+            
+            1. **GBM (Baseline):** Standard Geometric Brownian Motion. Assumes constant volatility and normal returns.
+            
+            2. **Student-t (Fat Tails):** Adjusts for 'Leptokurtosis'. Models the reality that extreme market moves happen more often than a normal distribution suggests.
+            
+            3. **Merton Jump-Diffusion:** Adds discrete 'jumps' to the price path. Essential for modeling sudden overnight crashes or 'Black Swan' events.
+            
+            4. **Heston (Current):** Stochastic Volatility model. Volatility is treated as a random variable that spikes when prices drop. This captures the **Volatility Smile** and provides the most accurate pricing for downside barriers.
+            """)
+
+    with col_run:
+        run_sim = st.button("Run Monte Carlo Simulations & Optimize Portfolio", type="primary", use_container_width=True)
+
+    if run_sim:
         with st.spinner("Analysing base portfolio and simulating note trajectories..."):
 
             # Parse base portfolio
@@ -171,6 +189,23 @@ if uploaded_notes:
                     autocall_obs_freq=ac_freq,
                     participation_rate=part_rate,
                     max_return_pct=max_ret,
+                    vol_adj=0.0,
+                )
+
+                # Run Sensitivity Scenarios (Vol +5% and Vol +10%)
+                metrics_v5 = simulate_note_metrics(
+                    proxy_ticker=proxy, barrier=barrier, target_yield=yield_pct,
+                    note_type=note_type, term_years=term_years,
+                    autocall_threshold_pct=ac_thresh, autocall_obs_freq=ac_freq,
+                    participation_rate=part_rate, max_return_pct=max_ret,
+                    vol_adj=0.05
+                )
+                metrics_v10 = simulate_note_metrics(
+                    proxy_ticker=proxy, barrier=barrier, target_yield=yield_pct,
+                    note_type=note_type, term_years=term_years,
+                    autocall_threshold_pct=ac_thresh, autocall_obs_freq=ac_freq,
+                    participation_rate=part_rate, max_return_pct=max_ret,
+                    vol_adj=0.10
                 )
 
                 new_sharpe = np.nan
@@ -204,6 +239,9 @@ if uploaded_notes:
                     "Target Yield (%)":        yield_pct,
                     "Barrier (%)":             barrier,
                     "Prob. Capital Loss (%)":  metrics["Prob. of Capital Loss"] if metrics else np.nan,
+                    "Worst Case Ann. Loss (%)":metrics.get("Worst Case Ann. Loss") if metrics else np.nan,
+                    "P(Loss) Vol+5%":          metrics_v5["Prob. of Capital Loss"] if metrics_v5 else np.nan,
+                    "P(Loss) Vol+10%":         metrics_v10["Prob. of Capital Loss"] if metrics_v10 else np.nan,
                     "Expected Ann. Yield (%)": metrics["Expected Ann. Yield"]   if metrics else np.nan,
                     "Exp. Hold (yrs)":         metrics.get("expected_hold_years") if metrics else np.nan,
                     "Prob. Called (%)":        metrics.get("prob_called")         if metrics else np.nan,
@@ -230,6 +268,9 @@ if uploaded_notes:
                         "Target Yield (%)":        "{:.2f}%",
                         "Barrier (%)":             "{:.1f}%",
                         "Prob. Capital Loss (%)":  "{:.1f}%",
+                        "Worst Case Ann. Loss (%)":"{:.1f}%",
+                        "P(Loss) Vol+5%":          "{:.1f}%",
+                        "P(Loss) Vol+10%":         "{:.1f}%",
                         "Expected Ann. Yield (%)": "{:.2f}%",
                         "Exp. Hold (yrs)":         "{:.1f}",
                         "Prob. Called (%)":        "{:.1f}%",
@@ -237,7 +278,7 @@ if uploaded_notes:
                     }, na_rep="N/A")
                     .background_gradient(subset=["New Portfolio Sharpe"],   cmap="Blues")
                     .background_gradient(subset=["Structure Score"],         cmap="Greens")
-                    .background_gradient(subset=["Prob. Capital Loss (%)"],  cmap="Reds"),
+                    .background_gradient(subset=["Prob. Capital Loss (%)", "P(Loss) Vol+5%", "P(Loss) Vol+10%", "Worst Case Ann. Loss (%)"], cmap="Reds"),
                     use_container_width=True,
                 )
 
