@@ -3,11 +3,12 @@
 
 import io
 import json
+from typing import Optional
 import numpy as np
 import streamlit as st
 import yfinance as yf
 
-from core.config import BANK_COUPON_FALLBACKS, RISK_FREE_RATE, TRADING_DAYS_PER_YEAR
+from core.config import TRADING_DAYS_PER_YEAR
 
 _PROXY_MAP = {
     "canadian_banks":     "ZEB.TO",
@@ -46,7 +47,6 @@ EXTRACT THESE FIELDS:
 - "autocall_obs_freq": Frequency of autocall observations [monthly, quarterly, semi-annual, annual].
 - "participation_rate": Upside participation % (e.g., 100.0, 150.0). Null if not applicable.
 - "max_return_pct": Maximum total return cap over the life of the note. Null if uncapped.
-- "share_class": "F" (Fee-based) or "A" (Commission-based). Default to "F" if unsure.
 - "currency": "CAD" or "USD".
 """
 
@@ -65,9 +65,8 @@ def parse_note_pdf(file_bytes: io.BytesIO, filename: str, gemini_api_key: str) -
             "Underlying Index":       "Gemini API key not configured.",
             "Proxy ETF":              "XIU.TO",
             "Barrier (%)":            75.0,
-            "Target Yield (%)":       8.0,
+            "Target Yield (%)":       0.0,
             "Note Type":              "autocallable",
-            "Share Class":            "F",
             "Currency":               "CAD",
             "Term (Years)":           5,
             "Autocall Threshold (%)": 100.0,
@@ -95,7 +94,7 @@ def parse_note_pdf(file_bytes: io.BytesIO, filename: str, gemini_api_key: str) -
         issuer     = result.get("issuer") or "Unknown"
         index_name = result.get("underlying_index") or "Unknown Index"
         barrier    = float(result.get("barrier_pct") or 100.0)
-        coupon     = float(result.get("target_yield_pct") or BANK_COUPON_FALLBACKS.get(issuer, 0.0))
+        coupon     = float(result.get("target_yield_pct") or 0.0)
         proxy      = _PROXY_MAP.get(result.get("index_type") or "", "XIU.TO")
 
         max_ret_raw = result.get("max_return_pct")
@@ -107,7 +106,6 @@ def parse_note_pdf(file_bytes: io.BytesIO, filename: str, gemini_api_key: str) -
             "Barrier (%)":            barrier,
             "Target Yield (%)":       coupon,
             "Note Type":              result.get("note_type") or "autocallable",
-            "Share Class":            result.get("share_class") or "F",
             "Currency":               result.get("currency") or "CAD",
             "Term (Years)":           int(result.get("term_years") or 5),
             "Autocall Threshold (%)": float(result.get("autocall_threshold_pct") or 100.0),
@@ -122,9 +120,8 @@ def parse_note_pdf(file_bytes: io.BytesIO, filename: str, gemini_api_key: str) -
             "Underlying Index":       str(e),
             "Proxy ETF":              "XIU.TO",
             "Barrier (%)":            75.0,
-            "Target Yield (%)":       8.0,
+            "Target Yield (%)":       0.0,
             "Note Type":              "autocallable",
-            "Share Class":            "F",
             "Currency":               "CAD",
             "Term (Years)":           5,
             "Autocall Threshold (%)": 100.0,
@@ -144,9 +141,9 @@ def simulate_note_metrics(
     autocall_threshold_pct: float = 100.0,
     autocall_obs_freq: str = "annual",
     participation_rate: float = 100.0,
-    max_return_pct: float | None = None,
+    max_return_pct: Optional[float] = None,
     vol_adj: float = 0.0,
-) -> dict | None:
+) -> Optional[dict]:
     """
     Runs a GBM Monte Carlo simulation (5000 paths) to estimate risk/return metrics.
     Simulation logic is type-aware:
@@ -156,7 +153,9 @@ def simulate_note_metrics(
     Returns a dict including call_schedule (for autocallables) and expected_hold_years.
     """
     try:
-        hist = yf.Ticker(proxy_ticker).history(period="3y")["Close"]
+        # Use auto_adjust=False to capture Price Return (raw Close) instead of Total Return.
+        # This aligns with structured note underlyings (indices) that typically exclude dividends.
+        hist = yf.Ticker(proxy_ticker).history(period="3y", auto_adjust=False)["Close"]
         if hist.empty or len(hist) < 100:
             return None
 
@@ -261,9 +260,13 @@ def simulate_note_metrics(
             avg_loss_final = np.mean(final[breach]) / 100 if breach.sum() > 0 else 1.0
             ann_loss = ((max(avg_loss_final, 1e-10) ** (1 / term_years)) - 1) * 100
 
+            # FIX: Income notes (autocallable_coupon) pay coupons if safe at maturity.
+            # Kick-out notes (autocallable) usually just return principal (0% yield) if not called.
+            safe_yield = target_yield if note_type == "autocallable_coupon" else 0.0
+
             exp_yield = (
                 target_yield * p_called
-                + 0.0        * (above_barrier.sum() / sims)
+                + safe_yield * (above_barrier.sum() / sims)
                 + ann_loss   * p_breach
             )
             exp_hold = float(np.where(is_called, called_at_year, term_years).mean())
@@ -308,6 +311,32 @@ def simulate_note_metrics(
                 "Expected Ann. Yield":   exp_yield,
                 "Worst Case Ann. Loss":  worst_case_ann_loss,
                 "Structure Score":       score,
+                "call_schedule":         None,
+                "expected_hold_years":   float(term_years),
+                "prob_called":           None,
+            }
+
+        # ── Principal Protected ───────────────────────────────────────────────
+        if note_type == "principal_protected":
+            # PPNs guarantee principal (0% loss) regardless of barrier
+            # Return is usually Participation * Index Return (if positive)
+            gain_mask = final > 100
+            
+            raw_gains = (final[gain_mask] / 100 - 1) * (participation_rate / 100) * 100
+            if max_return_pct is not None:
+                raw_gains = np.minimum(raw_gains, max_return_pct)
+            
+            # Annualize the gains
+            ann_gains = ((1 + raw_gains / 100) ** (1 / term_years) - 1) * 100
+            avg_ann_gain = float(np.mean(ann_gains)) if len(ann_gains) > 0 else 0.0
+            
+            exp_yield = avg_ann_gain * (gain_mask.sum() / sims) + 0.0 # + fixed coupon if any?
+            
+            return {
+                "Prob. of Capital Loss": 0.0,
+                "Expected Ann. Yield":   exp_yield,
+                "Worst Case Ann. Loss":  0.0,
+                "Structure Score":       _calculate_score(exp_yield, 0.0, 0.0, 1.0),
                 "call_schedule":         None,
                 "expected_hold_years":   float(term_years),
                 "prob_called":           None,

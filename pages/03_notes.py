@@ -12,15 +12,20 @@ from core.config import (
     RISK_FREE_RATE, TRADING_DAYS_PER_YEAR,
 )
 from core.notes_engine import parse_note_pdf, simulate_note_metrics
+from core.ui import inject_css, render_hero, render_step
+from core.charts import plot_correlation_heatmap
 
-st.title("Structured Note Analyzer & Portfolio Integrator")
-st.markdown(
+inject_css()
+render_hero(
+    "Structured Note Analyzer",
     "Upload bank term sheets (PDFs) to extract payout structures, simulate barrier "
-    "breach probabilities, and mathematically rank custom notes against your existing holdings."
+    "breach probabilities, and mathematically rank custom notes against your existing holdings.",
 )
 
 # ── STEP 1: Base Portfolio ────────────────────────────────────────────────────
-st.markdown("### Step 1: Define Existing Portfolio")
+render_step(1, "Define Existing Holdings")
+
+st.markdown("#### A. Traditional Assets (Stocks/ETFs)")
 col_pf1, col_pf2, col_pf3 = st.columns([2, 2, 1])
 
 with col_pf1:
@@ -39,12 +44,30 @@ with col_pf3:
     existing_val = st.number_input("Current Portfolio Value ($)", value=DEFAULT_EXISTING_NOTE_VALUE, step=10000)
     new_inv_val  = st.number_input("New Cash to Invest ($)",      value=DEFAULT_NEW_CASH_VALUE,      step=5000)
 
+st.markdown("#### B. Existing Structured Notes")
+if "existing_notes_df" not in st.session_state:
+    st.session_state.existing_notes_df = pd.DataFrame([
+        {"Note Name": "Example Bank Note", "Proxy ETF": "XIU.TO", "Amount Invested ($)": 50000.0}
+    ])
+
+edited_existing_notes_df = st.data_editor(
+    st.session_state.existing_notes_df,
+    num_rows="dynamic",
+    width='stretch',
+    column_config={
+        "Note Name": st.column_config.TextColumn("Note Name / Identifier", required=True),
+        "Proxy ETF": st.column_config.TextColumn("Proxy ETF Ticker", required=True),
+        "Amount Invested ($)": st.column_config.NumberColumn("Amount Invested ($)", format="$%d", required=True),
+    },
+    key="existing_notes_editor"
+)
+
 # ── STEP 2: Note Uploads & Verification ──────────────────────────────────────
 if not st.session_state.get("gemini_api_key"):
     st.warning("Gemini API key not configured. Add `gemini_api_key` to `.streamlit/secrets.toml` to enable PDF parsing.")
     st.stop()
 
-st.markdown("### Step 2: Upload Potential Notes")
+render_step(2, "Upload Potential Notes")
 uploaded_notes = st.file_uploader(
     "Drop Note PDFs Here (Up to 10)",
     type=["pdf"],
@@ -72,7 +95,7 @@ if uploaded_notes:
 
     edited_notes_df = st.data_editor(
         st.session_state.parsed_pdfs,
-        use_container_width=True,
+        width='stretch',
         num_rows="dynamic",
         column_config={
             "Barrier (%)":            st.column_config.NumberColumn(format="%.1f%%"),
@@ -81,7 +104,6 @@ if uploaded_notes:
                                           options=["autocallable", "autocallable_coupon",
                                                    "accelerator", "booster",
                                                    "principal_protected", "other"]),
-            "Share Class":            st.column_config.SelectboxColumn(options=["F", "A"]),
             "Currency":               st.column_config.SelectboxColumn(options=["CAD", "USD"]),
             "Term (Years)":           st.column_config.NumberColumn(min_value=1, max_value=15, step=1, format="%d"),
             "Autocall Threshold (%)": st.column_config.NumberColumn(format="%.1f%%"),
@@ -92,7 +114,12 @@ if uploaded_notes:
         }
     )
 
+    # Check for missing yields (0.0%) and prompt user
+    if (edited_notes_df["Target Yield (%)"] == 0).any():
+        st.warning("⚠️ Some notes have a 0.00% yield. Please enter the correct Target Yield in the table above before running simulations.")
+
     # ── STEP 3: Simulation & Optimization ────────────────────────────────────
+    render_step(3, "Run Simulations &amp; Optimize")
     col_run, col_info = st.columns([4, 1])
     with col_info:
         with st.popover("ℹ️ Simulation Models"):
@@ -109,51 +136,102 @@ if uploaded_notes:
             """)
 
     with col_run:
-        run_sim = st.button("Run Monte Carlo Simulations & Optimize Portfolio", type="primary", use_container_width=True)
+        run_sim = st.button("Run Monte Carlo Simulations & Optimize Portfolio", type="primary", width='stretch')
 
     if run_sim:
         with st.spinner("Analysing base portfolio and simulating note trajectories..."):
 
-            # Parse base portfolio
-            base_tickers = [t.strip().upper() for t in base_manual.split(',') if t.strip()]
-            base_weights = {t: 1.0 / len(base_tickers) for t in base_tickers}
+            # 1. Consolidate all existing holdings (traditional + notes)
+            all_existing_holdings = {}
+            
+            # A. Traditional Assets
+            trad_tickers = [t.strip().upper() for t in base_manual.split(',') if t.strip()]
+            trad_weights = {t: 1.0 / len(trad_tickers) for t in trad_tickers}
 
             if base_csv is not None:
                 try:
-                    df_base = (
+                    df_trad = (
                         pd.read_csv(base_csv)
                         if base_csv.name.endswith('.csv')
                         else pd.read_excel(base_csv)
                     )
-                    if 'Ticker' in df_base.columns and 'Weight' in df_base.columns:
-                        base_weights = dict(zip(df_base['Ticker'].str.upper(), df_base['Weight']))
-                        base_tickers = list(base_weights.keys())
+                    if 'Ticker' in df_trad.columns and 'Weight' in df_trad.columns:
+                        trad_weights = dict(zip(df_trad['Ticker'].str.upper(), df_trad['Weight']))
+                        trad_tickers = list(trad_weights.keys())
                 except Exception as e:
                     st.warning(f"Could not parse the uploaded CSV ({e}). Using manually entered tickers.")
+            
+            for ticker, weight in trad_weights.items():
+                all_existing_holdings[ticker] = all_existing_holdings.get(ticker, 0) + (weight * existing_val)
 
-            # Download base portfolio history
+            # B. Existing Structured Notes
+            note_proxies = set()
+            for _, row in edited_existing_notes_df.iterrows():
+                proxy = str(row["Proxy ETF"]).strip().upper()
+                value = float(row["Amount Invested ($)"])
+                if proxy and value > 0:
+                    all_existing_holdings[proxy] = all_existing_holdings.get(proxy, 0) + value
+                    note_proxies.add(proxy)
+
+            # 2. Calculate base portfolio metrics
+            total_existing_val = sum(all_existing_holdings.values())
+            if total_existing_val == 0:
+                st.error("Total value of existing holdings is zero. Please input current portfolio details.")
+                st.stop()
+
+            base_tickers = list(all_existing_holdings.keys())
+            base_weights = {ticker: value / total_existing_val for ticker, value in all_existing_holdings.items()}
+            
             try:
-                base_hist = yf.download(base_tickers, period="3y", progress=False)['Close'].ffill()
-                if isinstance(base_hist, pd.Series):
-                    base_hist = base_hist.to_frame(name=base_tickers[0])
+                # Fetch raw data to distinguish between Price Return (Close) and Total Return (Adj Close)
+                raw_data = yf.download(base_tickers, period="3y", progress=False, auto_adjust=False, group_by='ticker')
+
+                if raw_data.empty:
+                    st.error(f"Failed to download any historical data for: {', '.join(base_tickers)}. Please check the ticker symbols.")
+                    st.stop()
+                
+                base_hist = pd.DataFrame(index=raw_data.index)
+                
+                # Robust extraction handling both MultiIndex (multi-ticker) and Flat Index (single-ticker)
+                for t in base_tickers:
+                    target_col = 'Close' if t in note_proxies else 'Adj Close'
+                    
+                    # Case 1: MultiIndex columns (Ticker -> OHLC)
+                    if isinstance(raw_data.columns, pd.MultiIndex):
+                        if t in raw_data.columns:
+                            base_hist[t] = raw_data[t][target_col]
+                    # Case 2: Flat columns (Single ticker result)
+                    elif target_col in raw_data.columns:
+                        base_hist[t] = raw_data[target_col]
+
+                if base_hist.empty:
+                    st.error("Could not extract price data. Please check ticker symbols.")
+                    st.stop()
+                
+                base_hist = base_hist.ffill()
+                
+                # Ensure timezone-naive index for consistency
+                if base_hist.index.tz is not None:
+                    base_hist.index = base_hist.index.tz_localize(None)
             except Exception as e:
-                st.error(f"Failed to download base portfolio data: {e}")
+                st.error(f"Failed to download historical data for existing holdings: {e}")
                 st.stop()
 
             base_daily_returns = base_hist.pct_change().dropna()
             weight_array = np.array([base_weights.get(c, 0) for c in base_daily_returns.columns])
-            port_returns = base_daily_returns.dot(weight_array)
-            base_mu      = port_returns.mean() * TRADING_DAYS_PER_YEAR
-            base_vol     = port_returns.std()  * np.sqrt(TRADING_DAYS_PER_YEAR)
-            base_sharpe  = (base_mu - RISK_FREE_RATE) / base_vol if base_vol > 0 else 0
+            base_port_returns = base_daily_returns.dot(weight_array)
+            base_mu      = base_port_returns.mean() * TRADING_DAYS_PER_YEAR
+            base_vol     = base_port_returns.std()  * np.sqrt(TRADING_DAYS_PER_YEAR)
+            base_sharpe  = (base_mu - st.session_state.get("risk_free_rate", RISK_FREE_RATE)) / base_vol if base_vol > 0 else 0
 
             st.info(f"**Current Baseline Portfolio Sharpe Ratio:** {base_sharpe:.2f}")
 
             # Simulate each note
             results        = []
             call_schedules = []
-            total_val      = existing_val + new_inv_val
-            existing_ratio = existing_val / total_val
+            corr_returns_dict = {"Existing Portfolio": base_port_returns}
+            total_val      = total_existing_val + new_inv_val
+            existing_ratio = total_existing_val / total_val
             new_note_ratio = new_inv_val  / total_val
 
             for _, row in edited_notes_df.iterrows():
@@ -209,30 +287,41 @@ if uploaded_notes:
                 )
 
                 new_sharpe = np.nan
+                sharpe_impact = np.nan
                 try:
-                    note_proxy_hist = (
-                        yf.Ticker(proxy).history(period="3y")['Close']
-                        .pct_change().dropna()
-                    )
+                    # Use auto_adjust=False to match Price Return logic of the simulation
+                    proxy_hist_raw = yf.Ticker(proxy).history(period="3y", auto_adjust=False)['Close']
+                    
+                    # Ensure timezone-naive index for consistency
+                    if proxy_hist_raw.index.tz is not None:
+                        proxy_hist_raw.index = proxy_hist_raw.index.tz_localize(None)
+
+                    note_proxy_hist = proxy_hist_raw.pct_change().dropna()
+                    
+                    # Store for correlation matrix
+                    corr_label = f"{row.get('Note Issuer', 'Note')} ({proxy})"
+                    corr_returns_dict[corr_label] = note_proxy_hist
+
                     aligned_data = pd.concat(
-                        [port_returns, note_proxy_hist.rename("Note")], axis=1
+                        [base_port_returns, note_proxy_hist.rename("Note")], axis=1
                     ).dropna()
 
                     if not aligned_data.empty:
                         new_port_returns = (
                             aligned_data.iloc[:, 0] * existing_ratio
-                            + aligned_data.iloc[:, 1] * new_note_ratio
+                            + aligned_data["Note"] * new_note_ratio
                         )
                         new_mu  = new_port_returns.mean() * TRADING_DAYS_PER_YEAR
                         new_vol = new_port_returns.std()  * np.sqrt(TRADING_DAYS_PER_YEAR)
-                        new_sharpe = (new_mu - RISK_FREE_RATE) / new_vol if new_vol > 0 else np.nan
+                        new_sharpe = (new_mu - st.session_state.get("risk_free_rate", RISK_FREE_RATE)) / new_vol if new_vol > 0 else np.nan
+                        if not np.isnan(new_sharpe):
+                            sharpe_impact = new_sharpe - base_sharpe
                 except Exception:
                     pass
 
                 results.append({
                     "Note Issuer":             row["Note Issuer"],
                     "Type":                    note_type,
-                    "Class":                   row.get("Share Class", "—"),
                     "CCY":                     row.get("Currency", "—"),
                     "Term":                    f"{term_years}yr",
                     "Proxy":                   proxy,
@@ -246,6 +335,7 @@ if uploaded_notes:
                     "Exp. Hold (yrs)":         metrics.get("expected_hold_years") if metrics else np.nan,
                     "Prob. Called (%)":        metrics.get("prob_called")         if metrics else np.nan,
                     "New Portfolio Sharpe":    new_sharpe,
+                    "Sharpe Impact":           sharpe_impact,
                     "Structure Score":         int(metrics["Structure Score"])    if metrics else 0,
                 })
 
@@ -262,7 +352,8 @@ if uploaded_notes:
                     .sort_values(by="New Portfolio Sharpe", ascending=False)
                     .reset_index(drop=True)
                 )
-                st.markdown("### Optimizer Results")
+                st.markdown("<br>", unsafe_allow_html=True)
+                st.markdown('<div class="as-section">Optimizer Results</div>', unsafe_allow_html=True)
                 st.dataframe(
                     df_results.style.format({
                         "Target Yield (%)":        "{:.2f}%",
@@ -275,17 +366,19 @@ if uploaded_notes:
                         "Exp. Hold (yrs)":         "{:.1f}",
                         "Prob. Called (%)":        "{:.1f}%",
                         "New Portfolio Sharpe":    "{:.2f}",
+                        "Sharpe Impact":           "{:+.2f}",
                     }, na_rep="N/A")
                     .background_gradient(subset=["New Portfolio Sharpe"],   cmap="Blues")
+                    .background_gradient(subset=["Sharpe Impact"],          cmap="RdYlGn", vmin=-0.1, vmax=0.1)
                     .background_gradient(subset=["Structure Score"],         cmap="Greens")
                     .background_gradient(subset=["Prob. Capital Loss (%)", "P(Loss) Vol+5%", "P(Loss) Vol+10%", "Worst Case Ann. Loss (%)"], cmap="Reds"),
-                    use_container_width=True,
+                    width='stretch',
                 )
 
                 # ── Autocall Call Schedule Expanders ─────────────────────────
                 autocall_notes = [cs for cs in call_schedules if cs["schedule"]]
                 if autocall_notes:
-                    st.markdown("### Autocall Call Schedule")
+                    st.markdown('<div class="as-section" style="margin-top:20px">Autocall Call Schedule</div>', unsafe_allow_html=True)
                     for cs in autocall_notes:
                         with st.expander(f"📅 {cs['label']}"):
                             sched_rows = sorted(cs["schedule"].items())
@@ -304,5 +397,15 @@ if uploaded_notes:
                                     "P(Called at this date) (%)": "{:.1f}%",
                                     "P(Called by this date) (%)": "{:.1f}%",
                                 }),
-                                use_container_width=True,
+                                width='stretch',
                             )
+
+                # ── Correlation Matrix ───────────────────────────────────────
+                st.markdown('<div class="as-section" style="margin-top:20px">Correlation Analysis</div>', unsafe_allow_html=True)
+                
+                # Align all returns (Portfolio + Note Proxies)
+                df_corr = pd.DataFrame(corr_returns_dict).dropna()
+                if not df_corr.empty and df_corr.shape[1] > 1:
+                    corr_matrix = df_corr.corr()
+                    fig_corr = plot_correlation_heatmap(corr_matrix)
+                    st.plotly_chart(fig_corr)
