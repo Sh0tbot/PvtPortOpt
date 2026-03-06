@@ -4,6 +4,7 @@
 
 import streamlit as st
 from core.config import PAGE_TITLE, PAGE_ICON
+from core.data import fetch_risk_free_rate
 
 st.set_page_config(
     page_title=PAGE_TITLE,
@@ -11,6 +12,8 @@ st.set_page_config(
     page_icon=PAGE_ICON,
     initial_sidebar_state="expanded",
 )
+
+st.logo("assets/logo.jpg", size="large")
 
 # Minimal CSS — theme colours come from .streamlit/config.toml
 st.markdown("""
@@ -66,6 +69,11 @@ try:
 except KeyError:
     st.sidebar.warning("Gemini API Key missing — structured note parsing unavailable.")
     st.session_state["gemini_api_key"] = None
+
+# ── Risk-Free Rate (10-Year Treasury, cached 24h) ─────────────────────────────
+st.session_state["risk_free_rate"] = fetch_risk_free_rate(
+    st.session_state.get("fmp_api_key") or ""
+)
 
 # ── Navigation ────────────────────────────────────────────────────────────────
 landing = st.Page("pages/01_landing.py", title="Home",              icon="🏠", default=True)

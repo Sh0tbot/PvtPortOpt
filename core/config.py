@@ -2,7 +2,7 @@
 # All hardcoded constants extracted from PvtOpt.py for single-source-of-truth management.
 
 # ── Risk / Return Parameters ─────────────────────────────────────────────────
-RISK_FREE_RATE = 0.02           # Used in Sharpe, Sortino, Alpha calculations
+RISK_FREE_RATE = 0.045          # Used in Sharpe, Sortino, Alpha calculations and options Greeks
 TRADING_DAYS_PER_YEAR = 252     # Annualization factor for daily returns
 
 # ── Monte Carlo Defaults ─────────────────────────────────────────────────────
@@ -56,6 +56,12 @@ YF_CATEGORY_MAP = {
     "canadian fixed income":            "Fixed Income",
     "canadian short term fixed income": "Fixed Income",
     "money market":                     "Cash & Equivalents",
+    "bond":                             "Fixed Income",
+    "preferred":                        "Fixed Income",
+    "us large":                         "US Equities",
+    "us mid":                           "US Equities",
+    "us small":                         "US Equities",
+    "american":                         "US Equities",
 }
 
 # ── yfinance camelCase Sector Key → GICS Display Name ────────────────────────

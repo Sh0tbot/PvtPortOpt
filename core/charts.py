@@ -38,7 +38,8 @@ def plot_efficient_frontier(
     opt_label: str,
     curr_vol: float = None,
     curr_ret: float = None,
-    max_weight: float = 1.0,
+    weight_bounds=(0, 1.0),
+    risk_free_rate: float = RISK_FREE_RATE,
 ) -> go.Figure:
     """
     Efficient frontier as a Sharpe-coloured scatter cloud with key portfolio overlays.
@@ -47,7 +48,13 @@ def plot_efficient_frontier(
     n_assets = len(mu)
     n_samples = 1500
     weights_samples = np.random.dirichlet(np.ones(n_assets), size=n_samples)
-    weights_samples = np.clip(weights_samples, 0, max_weight)
+    
+    if isinstance(weight_bounds, list):
+        upper_bounds = np.array([b[1] for b in weight_bounds])
+    else:
+        upper_bounds = weight_bounds[1]
+
+    weights_samples = np.clip(weights_samples, 0, upper_bounds)
     weights_samples /= weights_samples.sum(axis=1, keepdims=True)
 
     vols, rets, sharpes = [], [], []
@@ -56,7 +63,7 @@ def plot_efficient_frontier(
         v = float(np.sqrt(np.dot(w.T, np.dot(S.values, w))))
         vols.append(v * 100)
         rets.append(r * 100)
-        sharpes.append((r - RISK_FREE_RATE) / v if v > 0 else 0)
+        sharpes.append((r - risk_free_rate) / v if v > 0 else 0)
 
     fig = go.Figure()
 
@@ -109,7 +116,7 @@ def plot_efficient_frontier(
     _max_ret = float(mu.max()) * 0.99
     for _target in np.linspace(_min_ret, _max_ret, 60):
         try:
-            _ef = _EF(mu, S, weight_bounds=(0, max_weight), solver="SCS")
+            _ef = _EF(mu, S, weight_bounds=weight_bounds, solver="SCS")
             _ef.efficient_return(_target)
             _w = _ef.clean_weights()
             _w_arr = np.array([_w[k] for k in mu.index])
@@ -392,5 +399,42 @@ def plot_drawdown(drawdown_series: pd.Series) -> go.Figure:
         xaxis=dict(gridcolor="rgba(255,255,255,0.08)"),
         hovermode="x unified",
         height=320,
+    )
+    return fig
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8. Black-Litterman Comparison Chart
+# ─────────────────────────────────────────────────────────────────────────────
+def plot_bl_returns_comparison(market_prior: pd.Series, bl_posterior: pd.Series) -> go.Figure:
+    """
+    Grouped bar chart comparing Market Implied Prior vs Black-Litterman Posterior returns.
+    """
+    # Ensure alignment
+    common_idx = market_prior.index.intersection(bl_posterior.index)
+    
+    fig = go.Figure()
+    
+    fig.add_trace(go.Bar(
+        x=common_idx, 
+        y=market_prior.loc[common_idx].values * 100,
+        name="Market Implied Prior",
+        marker_color="rgba(255, 255, 255, 0.3)"
+    ))
+    
+    fig.add_trace(go.Bar(
+        x=common_idx, 
+        y=bl_posterior.loc[common_idx].values * 100,
+        name="Black-Litterman Posterior",
+        marker_color=BLUE
+    ))
+    
+    fig.update_layout(
+        **_LAYOUT_DEFAULTS,
+        title="Black-Litterman: Market Prior vs. Posterior Returns",
+        yaxis_title="Expected Annual Return (%)",
+        barmode='group',
+        height=400,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, bgcolor="rgba(0,0,0,0)"),
     )
     return fig
